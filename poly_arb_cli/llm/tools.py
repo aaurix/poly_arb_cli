@@ -10,7 +10,11 @@ from ..types import Platform
 
 
 def default_tools(pm_client: PolymarketClient, op_client: OpinionClient):
-    """Return a list of LangChain Tools bound to our clients."""
+    """构建基础工具集合。
+
+    这些工具仅依赖 HTTP 只读接口，不涉及下单与账户操作，
+    便于在 Agent 与 RAG 场景中安全复用。
+    """
 
     @tool("list_markets", return_direct=False)
     async def list_markets(platform: str = "all", limit: int = 10) -> str:
@@ -42,3 +46,6 @@ def default_tools(pm_client: PolymarketClient, op_client: OpinionClient):
         )
 
     return [list_markets, get_orderbook]
+
+
+__all__ = ["default_tools"]

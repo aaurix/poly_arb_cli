@@ -200,14 +200,42 @@ poetry run poly-arb <command> [options...]
   - 以 Textual 构建的终端 UI，展示套利机会列表；
   - 使用 `scan_once` 作为数据源。
 
-- **agent**：LangChain 1.x Agent
+- **agent**：基于 LangChain 1.x / LangGraph 的多模式 Agent / RAG
 
   ```bash
+  # 自动模式（文档关键词走 RAG，其余走基础工具）
   poetry run poly-arb agent "列出成交量最大的 Polymarket 市场"
+
+  # 强制文档 RAG（2-step）
+  poetry run poly-arb agent "agent 命令怎么用" --mode docs
+
+  # 基础工具 Agent（list/orderbook 等）
+  poetry run poly-arb agent "显示 516706 的盘口" --mode tools
+
+  # 市场语义检索 + 工具 Agent
+  poetry run poly-arb agent "找和 isreal-lebanon 相关的市场" --mode markets
+
+  # LangGraph Agentic RAG（包含 classify→rewrite→retrieve→grade→answer→check）
+  poetry run poly-arb agent "解释 run-bot 参数" --mode graph
   ```
 
-  - 工具封装了 `list_markets / get_orderbook / scan_arb` 等；
-  - 具体实现见 `poly_arb_cli/llm/agent.py`（LangChain v1 & LCEL 风格）。
+  模式说明：
+
+  - `docs`：文档 RAG（2-step），严格依据 README/docs 回答，不足则说不知道；
+  - `tools`：旧版工具型 Agent（只读查询 list/orderbook）；
+  - `markets`：语义检索市场 + 行情工具（跨平台）；
+  - `graph`：LangGraph Agentic RAG，自动分类 docs/markets，并含 query rewrite/grade/answer check；
+  - `auto`（默认）：含文档关键词时走文档 RAG，否则走工具型 Agent。
+
+  索引构建（建议先跑）：
+
+  ```bash
+  poetry run poly-arb build-docs-index          # 构建文档向量索引（data/chroma_docs）
+  poetry run poly-arb build-markets-index --limit 2000  # 构建市场语义索引（data/chroma_markets）
+  ```
+
+  模型与 Embeddings：
+  - 从 `.env` / `Settings` 读取：`OPENAI_API_KEY`、`OPENAI_BASE_URL`、`OPENAI_MODEL`（默认 gpt-4o-mini）、`EMBEDDING_MODEL`（默认 text-embedding-3-large）。
 
 ---
 

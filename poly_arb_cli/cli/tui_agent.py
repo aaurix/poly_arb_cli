@@ -23,11 +23,17 @@ def tui(limit: int, threshold: float) -> None:
 @main.command("agent")
 @click.argument("question", type=str)
 @click.option("--model", default=None, help="LLM model name (OpenAI-compatible).")
-def agent(question: str, model: str | None) -> None:
-    """通过 LangChain Agent 以自然语言查询市场与盘口。"""
-    answer = run_question(question, model=model)
+@click.option(
+    "--mode",
+    type=click.Choice(["auto", "docs", "tools", "markets", "graph"], case_sensitive=False),
+    default="auto",
+    show_default=True,
+    help="选择 Agent 模式：文档 RAG、基础工具、市场 RAG、LangGraph 等。",
+)
+def agent(question: str, model: str | None, mode: str) -> None:
+    """通过 LangChain Agent / RAG 回答问题。"""
+    answer = run_question(question, model=model, mode=mode)
     console.print(answer)
 
 
 __all__ = ["tui", "agent"]
-

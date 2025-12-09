@@ -9,6 +9,15 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     """Runtime configuration loaded from env or .env file."""
 
+    # 本地数据目录，用于存放缓存/向量索引等构建产物
+    data_dir: Path = Path("data")
+
+    # LLM / Embedding 相关配置（OpenAI 兼容）
+    openai_api_key: Optional[str] = None
+    openai_base_url: Optional[str] = None
+    openai_model: str = "gpt-4o-mini"
+    embedding_model: str = "text-embedding-3-large"
+
     polymarket_private_key: Optional[str] = None
     polymarket_api_key: Optional[str] = None
     polymarket_base_url: str = "https://gamma-api.polymarket.com"
@@ -61,3 +70,12 @@ class Settings(BaseSettings):
         if overrides:
             kwargs.update(overrides)
         return cls(**kwargs)
+
+    def ensure_data_dir(self) -> Path:
+        """确保 data_dir 存在并返回绝对路径。"""
+
+        path = self.data_dir
+        if not path.is_absolute():
+            path = Path(".").resolve() / path
+        path.mkdir(parents=True, exist_ok=True)
+        return path
