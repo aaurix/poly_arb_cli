@@ -1,0 +1,14 @@
+__pycache__/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+.idea/
+.vscode/
+.DS_Store
+dist/
+build/
+.coverage
+.env
+.cache/
+data/
