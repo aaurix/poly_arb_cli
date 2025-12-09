@@ -1,13 +1,17 @@
 """基于 LangGraph 的 Agentic RAG 图（正式流程）。
 
-当前图包含六个节点：
+当前图包含若干节点：
 
-- classify: 判定问题类型（docs / markets），可附带平台过滤；
+- classify: 判定问题类型（docs / markets / tools），可附带平台过滤；
 - query_rewrite: 将用户问题改写为更利于检索的短句；
-- retrieve: 按类型调用对应 retriever 聚合上下文；
+- retrieve: 按类型调用对应 retriever 或实时 API 聚合上下文；
 - grade: 让 LLM 选择最相关的文档片段，过滤噪声；
-- answer: 基于上下文生成回答；
+- answer: 基于上下文生成回答（包括 tools 节返回的动态数据）；
 - answer_check: 检查回答是否被上下文支持，不足则提示。
+
+其中 tools 分支用于“动态数据”问题（如成交量最大市场），
+会直接调用 Polymarket/Opinion API 获取最新信息，再交由 LLM
+进行归纳总结。
 """
 
 from __future__ import annotations
@@ -16,12 +20,15 @@ import asyncio
 import json
 from typing import Any, TypedDict
 
-from langchain_openai import ChatOpenAI
 from langchain_core.documents import Document
 from langchain_core.vectorstores import VectorStore
+from langchain_openai import ChatOpenAI
 from langgraph.graph import END, START, StateGraph
 
+from ..clients.opinion import OpinionClient
+from ..clients.polymarket import PolymarketClient
 from ..config import Settings
+from ..types import Market
 from .vectorstore import build_docs_vectorstore, build_markets_vectorstore
 
 
@@ -78,7 +85,15 @@ def build_agentic_rag_graph() -> Any:
         prefer_docs = any(
             key in q_lower for key in ["readme", "architecture", "架构", "命令", "cli", "文档"]
         )
-        default_route = "docs" if prefer_docs else "markets"
+        prefer_tools = any(
+            key in q_lower for key in ["成交量", "24h", "24小时", "流动性", "liquidity", "按成交量", "按流动性"]
+        )
+        if prefer_tools:
+            default_route = "tools"
+        elif prefer_docs:
+            default_route = "docs"
+        else:
+            default_route = "markets"
 
         route = default_route
         platform: str | None = None
@@ -108,7 +123,7 @@ def build_agentic_rag_graph() -> Any:
             route = default_route
             platform = None
 
-        if route not in {"docs", "markets"}:
+        if route not in {"docs", "markets", "tools"}:
             route = default_route
 
         return {
@@ -145,6 +160,52 @@ def build_agentic_rag_graph() -> Any:
         platform_filter = (state.get("platform_filter") or "").lower()
 
         docs: list[Document] = []
+        if route == "tools":
+            # tools 分支：直接通过 API 实时获取成交量最高市场等动态信息，
+            # 然后将结果串联为上下文文本，交由后续 answer 节点生成自然语言回答。
+            try:
+                platforms: list[str]
+                if platform_filter in {"polymarket", "opinion"}:
+                    platforms = [platform_filter]
+                else:
+                    platforms = ["polymarket"]
+
+                async def _fetch() -> list[Market]:
+                    pm_client = PolymarketClient(settings)
+                    op_client = OpinionClient(settings)
+                    try:
+                        results: list[Market] = []
+                        for p in platforms:
+                            if p == "polymarket":
+                                pm_markets = await pm_client.list_active_markets(limit=200)
+                                pm_markets.sort(key=lambda m: (m.volume or 0.0), reverse=True)
+                                results.extend(pm_markets[:10])
+                            elif p == "opinion":
+                                op_markets = await op_client.list_active_markets(limit=200)
+                                op_markets.sort(key=lambda m: (m.volume or 0.0), reverse=True)
+                                results.extend(op_markets[:10])
+                        return results[:10]
+                    finally:
+                        await asyncio.gather(pm_client.close(), op_client.close())
+
+                top_markets = asyncio.run(_fetch())
+                if not top_markets:
+                    serialized = "未能从实时 API 获取到任何活跃市场，可能是上游接口暂不可用。"
+                else:
+                    lines: list[str] = [
+                        "以下为根据实时 24h 成交量排序的活跃市场（最多前 10 条）："
+                    ]
+                    for m in top_markets:
+                        lines.append(
+                            f"- [{m.platform.value}] {m.market_id} | {m.title} | "
+                            f"24hVolume={m.volume or 0:.2f} | Liquidity={m.liquidity or 0:.2f}"
+                        )
+                    serialized = "\n".join(lines)
+            except Exception as exc:  # noqa: BLE001
+                serialized = f"实时查询市场信息失败：{exc}"
+
+            return {**state, "docs": [], "context": serialized}
+
         if route == "markets":
             search_kwargs = {"k": 8}
             if platform_filter in {"polymarket", "opinion"}:
