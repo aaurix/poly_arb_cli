@@ -6,18 +6,21 @@
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 import click
 from rich.console import Console
 from rich.table import Table
 
 from .clients.opinion import OpinionClient
 from .clients.polymarket import PolymarketClient
+from .clients.perp import PerpClient
 from .config import Settings
 from .llm.agent import run_question
 from .services.matcher import match_markets
+from .services.hedge_scanner import load_hedge_markets, scan_hedged_opportunities
 from .services.scanner import scan_once
 from .storage import log_opportunities, timestamp
-from .types import ArbOpportunity, Market, OrderBook, Position
+from .types import ArbOpportunity, HedgeOpportunity, Market, OrderBook, Position
 from .ui.dashboard import run_dashboard
 
 console = Console()
@@ -28,8 +31,8 @@ def _build_clients(settings: Settings) -> tuple[PolymarketClient, OpinionClient]
     return PolymarketClient(settings), OpinionClient(settings)
 
 
-async def _list_markets(platform: str, limit: int) -> None:
-    """列出指定平台的活跃市场。"""
+async def _list_markets(platform: str, limit: int, sort: str | None = None) -> None:
+    """列出指定平台的活跃市场，可按成交量/流动性排序。"""
     settings = Settings.load()
     platform = _normalize_platform(platform)
     pm_client, op_client = _build_clients(settings)
@@ -37,16 +40,39 @@ async def _list_markets(platform: str, limit: int) -> None:
     try:
         rows: list[Market] = []
         if platform in ("polymarket", "all"):
-            rows.extend(await pm_client.list_active_markets(limit=limit))
+            # 为了有意义的排序，这里多取一些市场再在本地排序截断。
+            fetch_limit = max(limit, 100) if sort else limit
+            rows.extend(await pm_client.list_active_markets(limit=fetch_limit))
         if platform in ("opinion", "all"):
             rows.extend(await op_client.list_active_markets(limit=limit))
+
+        # 按需排序（仅对有数值的字段生效）
+        if sort == "volume":
+            rows.sort(key=lambda m: (m.volume or 0.0), reverse=True)
+        elif sort == "liquidity":
+            rows.sort(key=lambda m: (m.liquidity or 0.0), reverse=True)
+
+        rows = rows[:limit]
 
         table = Table(title="Markets", show_lines=False)
         table.add_column("Platform")
         table.add_column("ID")
         table.add_column("Title")
+        if sort in ("volume", "liquidity"):
+            table.add_column("24h Volume", justify="right")
+            table.add_column("Liquidity", justify="right")
+
         for market in rows:
-            table.add_row(market.platform.value, market.market_id, market.title)
+            if sort in ("volume", "liquidity"):
+                table.add_row(
+                    market.platform.value,
+                    market.market_id,
+                    market.title,
+                    f"{market.volume or 0:.2f}",
+                    f"{market.liquidity or 0:.2f}",
+                )
+            else:
+                table.add_row(market.platform.value, market.market_id, market.title)
         console.print(table)
     finally:
         await asyncio.gather(pm_client.close(), op_client.close())
@@ -78,6 +104,56 @@ async def _scan(limit: int, threshold: float) -> None:
         await asyncio.gather(pm_client.close(), op_client.close())
 
 
+async def _scan_hedge(
+    map_path: Path,
+    pm_limit: int,
+    min_edge: float | None,
+    default_vol: float | None,
+    exchange: str | None,
+) -> None:
+    """对标的型市场执行一次中性对冲机会扫描。"""
+    settings_overrides = {"perp_exchange": exchange} if exchange else None
+    settings = Settings.load(overrides=settings_overrides)
+    pm_client = PolymarketClient(settings)
+    perp_client = PerpClient(settings, exchange_id=exchange)
+    try:
+        mappings = load_hedge_markets(map_path)
+        if not mappings:
+            console.print(f"[yellow]No hedge mappings found in {map_path}[/yellow]")
+            return
+
+        opportunities = await scan_hedged_opportunities(
+            pm_client,
+            perp_client,
+            mappings,
+            pm_limit=pm_limit,
+            min_edge_percent=min_edge if min_edge is not None else settings.hedge_min_edge_percent,
+            default_vol=default_vol if default_vol is not None else settings.hedge_default_vol,
+        )
+        _print_hedge_opportunities(opportunities)
+        log_opportunities(
+            [
+                {
+                    "ts": timestamp(),
+                    "market_id": opp.market.market_id,
+                    "title": opp.market.title,
+                    "underlying": opp.underlying_symbol,
+                    "pm_yes": opp.pm_yes,
+                    "implied_yes": opp.implied_yes,
+                    "edge_pct": opp.edge_percent,
+                    "strike": opp.strike,
+                    "expiry": opp.expiry,
+                    "funding": opp.funding_rate,
+                    "note": opp.note,
+                }
+                for opp in opportunities
+            ],
+            file_name="hedged_opportunities.jsonl",
+        )
+    finally:
+        await asyncio.gather(pm_client.close(), perp_client.close())
+
+
 async def _preview_matches(limit: int, threshold: float) -> None:
     """预览标题匹配后的市场对，用于调试匹配质量。"""
     settings = Settings.load()
@@ -101,7 +177,12 @@ async def _preview_matches(limit: int, threshold: float) -> None:
 
 def _print_opportunities(opportunities: list[ArbOpportunity]) -> None:
     """以 Rich 表格形式渲染套利机会列表。"""
-    table = Table(title="Arbitrage Opportunities", header_style="bold cyan", show_lines=False, row_styles=["dim", ""])
+    table = Table(
+        title="Arbitrage Opportunities",
+        header_style="bold cyan",
+        show_lines=False,
+        row_styles=["dim", ""],
+    )
     table.add_column("Route", style="magenta", justify="left")
     table.add_column("PM ID", overflow="fold")
     table.add_column("OP ID", overflow="fold")
@@ -122,6 +203,45 @@ def _print_opportunities(opportunities: list[ArbOpportunity]) -> None:
             opp.price_breakdown or "",
         )
     console.print(table)
+
+
+def _print_hedge_opportunities(opportunities: list[HedgeOpportunity]) -> None:
+    """渲染基于衍生品概率的对冲机会。"""
+    table = Table(
+        title="Hedged Opportunities",
+        header_style="bold cyan",
+        show_lines=False,
+        row_styles=["dim", ""],
+    )
+    table.add_column("Market ID", overflow="fold")
+    table.add_column("Title", overflow="fold")
+    table.add_column("Underlying", style="magenta")
+    table.add_column("PM YES", justify="right")
+    table.add_column("Implied YES", justify="right")
+    table.add_column("Edge %", justify="right")
+    table.add_column("Px/Strike", justify="right")
+    table.add_column("Expiry", overflow="fold")
+    table.add_column("Funding", justify="right")
+    table.add_column("Note", overflow="fold")
+
+    for opp in opportunities:
+        edge_style = "green" if opp.edge_percent > 0 else "red"
+        table.add_row(
+            opp.market.market_id,
+            opp.market.title,
+            opp.underlying_symbol,
+            f"{opp.pm_yes:.4f}",
+            f"{opp.implied_yes:.4f}",
+            f"[{edge_style}]{opp.edge_percent:.2f}[/{edge_style}]",
+            f"{opp.underlying_price:.1f}/{opp.strike:.0f}",
+            opp.expiry,
+            f"{opp.funding_rate:.6f}" if opp.funding_rate is not None else "-",
+            opp.note or "",
+        )
+    if not opportunities:
+        console.print("[yellow]No hedged opportunities found[/yellow]")
+    else:
+        console.print(table)
 
 
 def _print_orderbook(label: str, book: OrderBook, depth: int) -> None:
@@ -241,9 +361,17 @@ def main() -> None:
 @main.command("list-markets")
 @click.option("--platform", default="all", show_default=True, help="polymarket|opinion|all")
 @click.option("--limit", default=10, show_default=True, type=int, help="Max markets per venue.")
-def list_markets(platform: str, limit: int) -> None:
-    """显示活跃市场列表。"""
-    asyncio.run(_list_markets(platform=platform, limit=limit))
+@click.option(
+    "--sort",
+    type=click.Choice(["none", "volume", "liquidity"], case_sensitive=False),
+    default="volume",
+    show_default=True,
+    help="按 24h 成交量或当前流动性排序（仅对 Polymarket 有效）。",
+)
+def list_markets(platform: str, limit: int, sort: str) -> None:
+    """显示活跃市场列表，默认按 24h 成交量排序。"""
+    sort_key = None if sort == "none" else sort
+    asyncio.run(_list_markets(platform=platform, limit=limit, sort=sort_key))
 
 
 @main.command("search-markets")
@@ -263,6 +391,54 @@ def scan_arb(limit: int, threshold: float) -> None:
     asyncio.run(_scan(limit=limit, threshold=threshold))
 
 
+@main.command("scan-hedge")
+@click.option(
+    "--map-path",
+    default="data/underlying_map.json",
+    show_default=True,
+    type=click.Path(path_type=Path),
+    help="JSON mapping of Polymarket markets to underlyings.",
+)
+@click.option(
+    "--pm-limit",
+    default=200,
+    show_default=True,
+    type=int,
+    help="Max Polymarket markets to pull.",
+)
+@click.option(
+    "--min-edge",
+    default=None,
+    type=float,
+    help="Minimum absolute edge percent to display.",
+)
+@click.option(
+    "--vol",
+    default=None,
+    type=float,
+    help="Override default annualized vol for probability calc.",
+)
+@click.option(
+    "--exchange",
+    default=None,
+    type=str,
+    help="Override perp exchange id (ccxt id).",
+)
+def scan_hedge(
+    map_path: Path, pm_limit: int, min_edge: float | None, vol: float | None, exchange: str | None
+) -> None:
+    """Compare Polymarket prices with perp-implied probabilities for mapped markets."""
+    asyncio.run(
+        _scan_hedge(
+            map_path=map_path,
+            pm_limit=pm_limit,
+            min_edge=min_edge,
+            default_vol=vol,
+            exchange=exchange,
+        )
+    )
+
+
 @main.command("match-preview")
 @click.option("--limit", default=10, show_default=True, type=int)
 @click.option("--threshold", default=0.6, show_default=True, type=float)
@@ -274,7 +450,13 @@ def match_preview(limit: int, threshold: float) -> None:
 @main.command("run-bot")
 @click.option("--interval", default=30, show_default=True, type=int, help="Seconds between scans.")
 @click.option("--threshold", default=0.6, show_default=True, type=float)
-def run_bot(interval: int, threshold: float) -> None:
+@click.option(
+    "--use-ws",
+    is_flag=True,
+    default=False,
+    help="优先使用 Polymarket WebSocket 行情（若可用），否则退回 REST 盘口。",
+)
+def run_bot(interval: int, threshold: float, use_ws: bool) -> None:
     """Continuously scan for arbitrage with live-updating table."""
 
     async def _loop() -> None:
@@ -282,10 +464,36 @@ def run_bot(interval: int, threshold: float) -> None:
 
         settings = Settings.load(overrides={"scan_interval_seconds": interval})
         pm_client, op_client = _build_clients(settings)
+
+        pm_state = None
+        feed_task = None
+
+        # 如选择 use_ws，则启动 MARKET WebSocket feed 并维护本地 state。
+        if use_ws:
+            from .connectors.polymarket_ws import MarketWsFeed, PolymarketStreamState
+
+            pm_state = PolymarketStreamState()
+            # 订阅当前活跃市场的所有 YES/NO token
+            pm_markets = await pm_client.list_active_markets(limit=50)
+            asset_ids: set[str] = set()
+            for m in pm_markets:
+                if m.yes_token_id:
+                    asset_ids.add(m.yes_token_id)
+                if m.no_token_id:
+                    asset_ids.add(m.no_token_id)
+            feed = MarketWsFeed(settings, pm_state, asset_ids)
+            feed_task = asyncio.create_task(feed.run())
+
         try:
             with Live(refresh_per_second=4, console=console) as live:
                 while True:
-                    opportunities = await scan_once(pm_client, op_client, limit=20, threshold=threshold)
+                    opportunities = await scan_once(
+                        pm_client,
+                        op_client,
+                        limit=20,
+                        threshold=threshold,
+                        pm_state=pm_state,
+                    )
                     table = Table(title="Arbitrage Opportunities (live)", header_style="bold cyan", show_lines=False, row_styles=["dim", ""])
                     table.add_column("Route", style="magenta")
                     table.add_column("PM ID")
@@ -308,6 +516,13 @@ def run_bot(interval: int, threshold: float) -> None:
                     live.update(table)
                     await asyncio.sleep(interval)
         finally:
+            if feed_task:
+                feed_task.cancel()
+                # 忽略取消异常
+                try:
+                    await feed_task
+                except Exception:
+                    pass
             await asyncio.gather(pm_client.close(), op_client.close())
 
     asyncio.run(_loop())
@@ -326,7 +541,7 @@ def run_bot(interval: int, threshold: float) -> None:
     default=5,
     show_default=True,
     type=int,
-    help="轮询 Polymarket 成交的间隔秒数。",
+    help="刷新间隔秒数。",
 )
 @click.option(
     "--window",
@@ -336,7 +551,7 @@ def run_bot(interval: int, threshold: float) -> None:
     help="界面中最多展示的最近成交条数。",
 )
 def trades_tape(min_notional: float, interval: int, window: int) -> None:
-    """实时展示 Polymarket 大额成交流水。"""
+    """实时展示 Polymarket 大额成交流水（默认使用 WS，必要时回退 Data-API）。"""
 
     async def _run() -> None:
         from rich.live import Live
@@ -346,42 +561,54 @@ def trades_tape(min_notional: float, interval: int, window: int) -> None:
         settings = Settings.load()
         pm_client, op_client = _build_clients(settings)
 
-        # 状态统计
-        recent_trades: list[TradeEvent] = []
-        seen_hashes: set[str] = set()
-        last_ts: int = 0
+        # 统计状态
         total_count = 0
         total_notional = 0.0
+
+        # 为 WS 模式准备的本地 state
+        pm_state = None
+        feed_task = None
+        condition_to_title: dict[str, str] = {}
+        token_to_outcome: dict[str, str] = {}
+
+        # 默认启动 WS feed；若失败则下方自动回退到 Data-API
+        from .connectors.polymarket_ws import MarketWsFeed, PolymarketStreamState
+
+        pm_state = PolymarketStreamState()
+        pm_markets = await pm_client.list_active_markets(limit=200)
+        asset_ids: set[str] = set()
+        for m in pm_markets:
+            condition_to_title[m.market_id] = m.title
+            if m.yes_token_id:
+                asset_ids.add(m.yes_token_id)
+                token_to_outcome[m.yes_token_id] = "YES"
+            if m.no_token_id:
+                asset_ids.add(m.no_token_id)
+                token_to_outcome[m.no_token_id] = "NO"
+        if asset_ids:
+            feed = MarketWsFeed(settings, pm_state, asset_ids)
+            feed_task = asyncio.create_task(feed.run())
 
         try:
             with Live(console=console, refresh_per_second=4) as live:
                 while True:
-                    trades = await pm_client.get_recent_trades(limit=200)
+                    # 获取最新成交：优先 WS，本地无数据则退回 Data-API
+                    recent_trades: list[TradeEvent] = []
+                    if pm_state is not None and pm_state.trades_by_condition:
+                        from itertools import chain
 
-                    # Data-API 按时间倒序返回，这里只保留新且大额的成交
-                    new_trades: list[TradeEvent] = []
-                    for t in trades:
-                        if t.timestamp < last_ts:
-                            break
-                        if t.tx_hash and t.tx_hash in seen_hashes:
-                            continue
-                        if t.notional < min_notional:
-                            continue
-                        new_trades.append(t)
+                        buf_iter = pm_state.trades_by_condition.values()
+                        all_trades = list(chain.from_iterable(buf_iter))
+                        all_trades = [t for t in all_trades if t.notional >= min_notional]
+                        # 时间倒序
+                        recent_trades = sorted(all_trades, key=lambda x: x.timestamp, reverse=True)[:window]
+                    else:
+                        trades = await pm_client.get_recent_trades(limit=200)
+                        trades = [t for t in trades if t.notional >= min_notional]
+                        recent_trades = trades[:window]
 
-                    if new_trades:
-                        # 处理顺序：先旧后新，append 到 recent_trades 尾部
-                        for t in reversed(new_trades):
-                            recent_trades.append(t)
-                            if t.tx_hash:
-                                seen_hashes.add(t.tx_hash)
-                            total_count += 1
-                            total_notional += t.notional
-                        last_ts = max(last_ts, max(t.timestamp for t in new_trades))
-
-                        if len(recent_trades) > window:
-                            recent_trades = recent_trades[-window:]
-
+                    total_notional = sum(t.notional for t in recent_trades)
+                    total_count = len(recent_trades)
                     avg_notional = total_notional / total_count if total_count else 0.0
 
                     # 统计面板
@@ -409,15 +636,17 @@ def trades_tape(min_notional: float, interval: int, window: int) -> None:
                     tape_table.add_column("Notional", justify="right")
                     tape_table.add_column("Trader", overflow="fold")
 
-                    for t in reversed(recent_trades):
+                    for t in recent_trades:
                         side = (t.side or "").upper()
                         side_style = "green" if side == "BUY" else "red"
                         time_str = t.dt.strftime("%H:%M:%S")
                         trader = t.pseudonym or (t.wallet[:10] + "..." if t.wallet else "")
+                        title = condition_to_title.get(t.condition_id, t.title or t.condition_id)
+                        outcome = token_to_outcome.get(t.token_id, "") or (t.outcome or "")
                         tape_table.add_row(
                             time_str,
-                            t.title,
-                            t.outcome or "",
+                            title,
+                            outcome,
                             f"[{side_style}]{side}[/{side_style}]",
                             f"{t.size:.2f}",
                             f"{t.price:.3f}",
@@ -434,9 +663,14 @@ def trades_tape(min_notional: float, interval: int, window: int) -> None:
 
                     await asyncio.sleep(interval)
         finally:
+            if feed_task:
+                feed_task.cancel()
+                try:
+                    await feed_task
+                except Exception:
+                    pass
             await asyncio.gather(pm_client.close(), op_client.close())
 
-    # 运行异步主循环
     asyncio.run(_run())
 
 

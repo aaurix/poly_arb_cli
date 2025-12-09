@@ -8,6 +8,7 @@
 - 配置 `.env` 后直接使用线上实时数据：  
   - `poetry run poly-arb list-markets --platform all|polymarket|opinion`  
   - `poetry run poly-arb scan-arb`  
+  - `poetry run poly-arb scan-hedge --map-path data/underlying_map.json`（需 ccxt，映射示例见 `data/underlying_map.sample.json`）  
   - `poetry run poly-arb run-bot --interval 10`  
   - `poetry run poly-arb orderbook <market_id> --platform polymarket`  
   - `poetry run poly-arb positions --platform all`  

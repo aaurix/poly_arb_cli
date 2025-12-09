@@ -33,7 +33,28 @@ class PolymarketClient:
         except Exception as exc:  # noqa: BLE001
             self._clob_import_error = exc
         else:
+            # 初始化 CLOB 客户端；如已配置 API 凭证则一并注入，便于后续使用 L2 接口。
             self._clob_client = ClobClient(host=settings.polymarket_clob_url)
+            try:
+                # 优先使用显式配置的 API 凭证
+                if (
+                    settings.polymkt_clob_api_key
+                    and settings.polymkt_clob_api_secret
+                    and settings.polygon_clob_api_passphrase
+                ):
+                    self._clob_client.set_api_creds(
+                        {
+                            "apiKey": settings.polymkt_clob_api_key,
+                            "secret": settings.polymkt_clob_api_secret,
+                            "passphrase": settings.polygon_clob_api_passphrase,
+                        }
+                    )
+                # 否则尝试通过私钥自动推导（官方 SDK 推荐方式）
+                elif settings.polymarket_private_key:
+                    self._clob_client.set_api_creds(self._clob_client.create_or_derive_api_creds())
+            except Exception:
+                # API 凭证注入失败不影响只读接口使用，具体 L2 调用会在运行时报错。
+                pass
 
     async def list_active_markets(self, limit: int = 50) -> List[Market]:
         """获取当前可交易的 Polymarket 市场列表。
@@ -60,6 +81,22 @@ class PolymarketClient:
         for mk in markets_raw[:limit]:
             market_id = mk.get("id") or mk.get("conditionId") or mk.get("marketHash") or mk.get("_id")
             title = mk.get("question") or mk.get("title") or mk.get("name") or str(market_id)
+            # 成交量与流动性字段（采用 24 小时 CLOB 成交量与当前 CLOB 流动性）
+            volume_24h = (
+                mk.get("volume24hrClob")
+                or mk.get("volume24hr")
+                or mk.get("volume24hrclob")
+                or mk.get("volume24HrClob")
+            )
+            liquidity = mk.get("liquidityClob") or mk.get("liquidityNum") or mk.get("liquidity")
+            try:
+                vol_val = float(volume_24h) if volume_24h is not None else None
+            except Exception:
+                vol_val = None
+            try:
+                liq_val = float(liquidity) if liquidity is not None else None
+            except Exception:
+                liq_val = None
             # clobTokenIds is a stringified list in Gamma; parse if present.
             yes_token = None
             no_token = None
@@ -81,6 +118,8 @@ class PolymarketClient:
                     platform=Platform.POLYMARKET,
                     market_id=str(market_id),
                     title=str(title),
+                     volume=vol_val,
+                     liquidity=liq_val,
                     yes_token_id=str(yes_token) if yes_token else None,
                     no_token_id=str(no_token) if no_token else None,
                 )

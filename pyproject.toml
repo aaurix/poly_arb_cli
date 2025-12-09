@@ -19,10 +19,12 @@ opinion-clob-sdk = "0.4.3"
 python-dotenv = "^1.0.1"
 # Latest Polymarket CLOB client from official repo; adjust revision as needed.
 py-clob-client = { git = "https://github.com/Polymarket/py-clob-client.git", rev = "main" }
+ccxt = "^4.4.0"
 langchain = ">=1.1.0,<1.2"
 langchain-openai = ">=1.1.0,<1.2"
 langchain-core = ">=1.1.0,<1.2"
 chromadb = "^0.5.3"
+websockets = "^13.0"
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^8.2.0"

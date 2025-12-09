@@ -16,12 +16,26 @@ class Settings(BaseSettings):
     polymarket_data_url: str = "https://data-api.polymarket.com"
     polymarket_ws_url: str = "wss://clob.polymarket.com/stream"
 
+    # 可选：显式配置 CLOB API 凭证（builder profile 中生成的 key/secret/passphrase）
+    polymkt_clob_api_key: Optional[str] = None
+    polymkt_clob_api_secret: Optional[str] = None
+    polygon_clob_api_passphrase: Optional[str] = None
+
     opinion_api_key: Optional[str] = None
     opinion_private_key: Optional[str] = None
     opinion_host: str = "https://proxy.opinion.trade:8443"
     opinion_ws_url: str = "wss://proxy.opinion.trade:8443/ws"
 
     rpc_url: Optional[str] = None
+
+    # 衍生品/对冲相关配置
+    perp_exchange: str = "binanceusdm"
+    perp_api_key: Optional[str] = None
+    perp_api_secret: Optional[str] = None
+    perp_testnet: bool = False
+
+    hedge_min_edge_percent: float = 2.0
+    hedge_default_vol: float = 1.0  # 年化波动率缺省值，用于概率近似
 
     scan_interval_seconds: int = 60
     max_trade_size: float = 50.0

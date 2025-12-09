@@ -1,18 +1,28 @@
 from __future__ import annotations
 
-from typing import List
+from typing import List, Optional
 
 from ..clients.opinion import OpinionClient
 from ..clients.polymarket import PolymarketClient
-from ..types import ArbOpportunity, MatchedMarket
+from ..connectors.polymarket_ws import PolymarketStreamState
+from ..types import ArbOpportunity, MatchedMarket, OrderBook
 from .matcher import match_markets
 from .pricing import best_price, clamp_slippage, compute_fill
 
 
-async def scan_once(polymarket_client: PolymarketClient, opinion_client: OpinionClient, *, limit: int = 50, threshold: float = 0.6) -> List[ArbOpportunity]:
-    """
-    Fetch markets, match them, and evaluate arbitrage conditions.
-    Uses depth-based pricing with slippage checks.
+async def scan_once(
+    polymarket_client: PolymarketClient,
+    opinion_client: OpinionClient,
+    *,
+    limit: int = 50,
+    threshold: float = 0.6,
+    pm_state: Optional[PolymarketStreamState] = None,
+) -> List[ArbOpportunity]:
+    """执行一次跨盘套利扫描。
+
+    优先从本地 PolymarketStreamState 读取盘口（若提供），
+    否则退回到 CLOB REST 接口。Opinion 一侧始终使用
+    Open API / SDK。
     """
     pm_markets = await polymarket_client.list_active_markets(limit=limit)
     op_markets = await opinion_client.list_active_markets(limit=limit)
@@ -23,9 +33,23 @@ async def scan_once(polymarket_client: PolymarketClient, opinion_client: Opinion
         settings = polymarket_client.settings  # shared config
         target_size = settings.default_quote_size
 
-        # Fetch orderbooks
-        pm_yes_book = await polymarket_client.get_orderbook(pair.polymarket, side="yes")
-        pm_no_book = await polymarket_client.get_orderbook(pair.polymarket, side="no")
+        # Fetch Polymarket orderbooks，优先使用本地 WS state。
+        pm_yes_book: OrderBook
+        pm_no_book: OrderBook
+
+        if pm_state is not None:
+            pm_yes_book = pm_state.get_orderbook_for_market(pair.polymarket, side="yes") or OrderBook(bids=[], asks=[])
+            pm_no_book = pm_state.get_orderbook_for_market(pair.polymarket, side="no") or OrderBook(bids=[], asks=[])
+        else:
+            pm_yes_book = OrderBook(bids=[], asks=[])
+            pm_no_book = OrderBook(bids=[], asks=[])
+
+        # 若本地 state 尚未覆盖，回退到 REST 查询。
+        if not pm_yes_book.bids and not pm_yes_book.asks:
+            pm_yes_book = await polymarket_client.get_orderbook(pair.polymarket, side="yes")
+        if not pm_no_book.bids and not pm_no_book.asks:
+            pm_no_book = await polymarket_client.get_orderbook(pair.polymarket, side="no")
+
         op_yes_book = await opinion_client.get_orderbook(pair.opinion, side="yes")
         op_no_book = await opinion_client.get_orderbook(pair.opinion, side="no")
 
