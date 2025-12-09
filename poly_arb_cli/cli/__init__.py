@@ -18,9 +18,9 @@ def main() -> None:
 from . import account as _account  # noqa: F401,E402
 from . import arb as _arb  # noqa: F401,E402
 from . import markets as _markets  # noqa: F401,E402
+from . import tags as _tags  # noqa: F401,E402
 from . import trades as _trades  # noqa: F401,E402
 from . import tui_agent as _tui_agent  # noqa: F401,E402
 
 
 __all__ = ["main"]
-

@@ -12,7 +12,38 @@ class Platform(str, Enum):
 
 
 @dataclass
+class Tag:
+    """Polymarket Gamma 标签元数据。
+
+    Attributes:
+        id: 标签唯一 ID。
+        label: 展示名称，如 \"Politics\"。
+        slug: 机器友好的短名称，如 \"politics\"。
+    """
+
+    id: str
+    label: str
+    slug: str
+
+
+@dataclass
 class Market:
+    """统一描述各平台市场元数据的数据类。
+
+    Attributes:
+        platform: 平台标识，当前支持 polymarket / opinion。
+        market_id: 人类友好的市场 ID（如 Gamma `id`）。
+        title: 市场标题或问题文本。
+        condition_id: Polymarket 条件 ID（若存在）。
+        end_date: 到期时间（如有），通常为 ISO8601 字符串。
+        yes_token_id: YES 合约的 token id（CLOB/盘口使用）。
+        no_token_id: NO 合约的 token id（CLOB/盘口使用）。
+        category: 归类标签，Polymarket 上通常来自 category 字段或首个 tag。
+        volume: 24 小时成交量（若平台提供）。
+        liquidity: 当前流动性指标（若平台提供）。
+        tags: 原始标签列表（如 Polymarket Gamma `tags` 字段）。
+    """
+
     platform: Platform
     market_id: str
     title: str
@@ -23,6 +54,7 @@ class Market:
     category: Optional[str] = None
     volume: Optional[float] = None
     liquidity: Optional[float] = None
+    tags: Optional[list[str]] = None
 
 
 @dataclass

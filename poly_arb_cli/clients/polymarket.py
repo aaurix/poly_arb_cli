@@ -9,7 +9,7 @@ from typing import Iterable, List, Optional
 import httpx
 
 from ..config import Settings
-from ..types import Market, OrderBook, OrderBookLevel, Platform, Position, PriceQuote, TradeEvent
+from ..types import Market, OrderBook, OrderBookLevel, Platform, Position, PriceQuote, Tag, TradeEvent
 
 
 class PolymarketClient:
@@ -56,11 +56,12 @@ class PolymarketClient:
                 # API 凭证注入失败不影响只读接口使用，具体 L2 调用会在运行时报错。
                 pass
 
-    async def list_active_markets(self, limit: int = 50) -> List[Market]:
+    async def list_active_markets(self, limit: int = 50, *, tag_id: Optional[str] = None) -> List[Market]:
         """获取当前可交易的 Polymarket 市场列表。
 
         Args:
             limit: 返回的最大市场数量。
+            tag_id: 可选 tag ID，仅返回该标签下的市场。
 
         Returns:
             按 Gamma API 返回顺序排好的 `Market` 列表。
@@ -72,6 +73,8 @@ class PolymarketClient:
             "limit": limit,
             "enableOrderBook": True,
         }
+        if tag_id:
+            params["tag_id"] = tag_id
         resp = await self._http.get("/markets", params=params)
         resp.raise_for_status()
         payload = resp.json()
@@ -82,6 +85,14 @@ class PolymarketClient:
             condition_id = mk.get("conditionId")
             market_id = mk.get("id") or condition_id or mk.get("marketHash") or mk.get("_id")
             title = mk.get("question") or mk.get("title") or mk.get("name") or str(market_id)
+            # 分类与标签字段：Gamma 通常提供 `category` 与 `tags`。
+            raw_category = mk.get("category")
+            raw_tags = mk.get("tags") or []
+            tags: list[str] = []
+            if isinstance(raw_tags, list):
+                tags = [str(t) for t in raw_tags if t is not None]
+            # 若未显式提供 category，则使用首个 tag 作为粗粒度分类。
+            category = str(raw_category) if raw_category else (tags[0] if tags else None)
             # 成交量与流动性字段（采用 24 小时 CLOB 成交量与当前 CLOB 流动性）
             volume_24h = (
                 mk.get("volume24hrClob")
@@ -119,11 +130,13 @@ class PolymarketClient:
                     platform=Platform.POLYMARKET,
                     market_id=str(market_id),
                     title=str(title),
-                     condition_id=str(condition_id) if condition_id else None,
-                     volume=vol_val,
-                     liquidity=liq_val,
+                    condition_id=str(condition_id) if condition_id else None,
+                    category=category,
+                    volume=vol_val,
+                    liquidity=liq_val,
                     yes_token_id=str(yes_token) if yes_token else None,
                     no_token_id=str(no_token) if no_token else None,
+                    tags=tags or None,
                 )
             )
         return results
@@ -279,6 +292,70 @@ class PolymarketClient:
                 continue
 
         return trades
+
+    async def list_tags(self, limit: int = 100, offset: int = 0) -> List[Tag]:
+        """列出 Polymarket Gamma 上的标签列表。
+
+        Args:
+            limit: 返回的最大标签数量。
+            offset: 起始偏移量，用于分页。
+
+        Returns:
+            标签数据列表；发生错误时返回空列表。
+        """
+        try:
+            resp = await self._http.get(
+                "/tags",
+                params={"limit": limit, "offset": offset},
+            )
+            resp.raise_for_status()
+            payload = resp.json()
+            tags_raw = payload if isinstance(payload, list) else []
+        except Exception:
+            return []
+
+        results: List[Tag] = []
+        for item in tags_raw:
+            try:
+                tag_id = str(item.get("id") or "")
+                label = str(item.get("label") or item.get("slug") or tag_id)
+                slug = str(item.get("slug") or label).lower()
+                if not tag_id:
+                    continue
+                results.append(Tag(id=tag_id, label=label, slug=slug))
+            except Exception:
+                continue
+        return results
+
+    async def get_tag_by_slug(self, slug: str) -> Optional[Tag]:
+        """根据 slug 查询单个标签。
+
+        Args:
+            slug: 标签 slug，例如 \"politics\"。
+
+        Returns:
+            匹配的标签对象；未找到或错误时返回 None。
+        """
+        if not slug:
+            return None
+        try:
+            resp = await self._http.get(f"/tags/slug/{slug}")
+            resp.raise_for_status()
+            data = resp.json()
+        except Exception:
+            return None
+
+        if not isinstance(data, dict):
+            return None
+        try:
+            tag_id = str(data.get("id") or "")
+            label = str(data.get("label") or data.get("slug") or tag_id)
+            slug_val = str(data.get("slug") or label).lower()
+            if not tag_id:
+                return None
+            return Tag(id=tag_id, label=label, slug=slug_val)
+        except Exception:
+            return None
 
 
 def _lookup(entries: Iterable[dict[str, object]], market_id: str) -> dict[str, object]:

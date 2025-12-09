@@ -27,7 +27,14 @@ from .common import (
 )
 
 
-async def _list_markets(platform: str, limit: int, sort: str | None = None) -> None:
+async def _list_markets(
+    platform: str,
+    limit: int,
+    sort: str | None = None,
+    category: str | None = None,
+    tag_slug: str | None = None,
+    tag_id: str | None = None,
+) -> None:
     """列出指定平台的活跃市场，可按成交量/流动性排序。
 
     Args:
@@ -44,9 +51,34 @@ async def _list_markets(platform: str, limit: int, sort: str | None = None) -> N
         if platform_norm in ("polymarket", "all"):
             # 为了有意义的排序，这里多取一些市场再在本地排序截断。
             fetch_limit = max(limit, 100) if sort else limit
-            rows.extend(await pm_client.list_active_markets(limit=fetch_limit))
+            pm_tag_id = None
+            if tag_slug and not tag_id:
+                # 尝试通过 slug 查询 tag_id
+                tag = await pm_client.get_tag_by_slug(tag_slug)
+                if not tag:
+                    console.print(f"[yellow]No Polymarket tag found for slug: {tag_slug}[/yellow]")
+                else:
+                    pm_tag_id = tag.id
+            elif tag_id:
+                pm_tag_id = tag_id
+
+            rows.extend(await pm_client.list_active_markets(limit=fetch_limit, tag_id=pm_tag_id))
         if platform_norm in ("opinion", "all"):
             rows.extend(await op_client.list_active_markets(limit=limit))
+
+        # 按分类/标签过滤（仅对 Polymarket 有意义）
+        if category:
+            cat_lower = category.lower()
+            filtered: list[Market] = []
+            for m in rows:
+                if m.category and cat_lower in m.category.lower():
+                    filtered.append(m)
+                    continue
+                if getattr(m, "tags", None):
+                    if any(cat_lower in t.lower() for t in m.tags or []):
+                        filtered.append(m)
+                        continue
+            rows = filtered
 
         # 按需排序（仅对有数值的字段生效）
         if sort == "volume":
@@ -127,16 +159,101 @@ async def _search_markets(platform: str, query: str, limit: int, search_limit: i
 @click.option("--platform", default="all", show_default=True, help="polymarket|opinion|all")
 @click.option("--limit", default=10, show_default=True, type=int, help="Max markets per venue.")
 @click.option(
+    "--category",
+    default=None,
+    show_default=False,
+    help="按 Polymarket 分类/标签过滤（如 politics、crypto 等）。",
+)
+@click.option(
+    "--tag-slug",
+    default=None,
+    show_default=False,
+    help="Polymarket 标签 slug（如 politics）。会使用 tag 过滤 Gamma /markets。",
+)
+@click.option(
+    "--tag-id",
+    default=None,
+    show_default=False,
+    help="Polymarket 标签 ID（整数 ID）。会使用 tag_id 过滤 Gamma /markets。",
+)
+@click.option(
     "--sort",
     type=click.Choice(["none", "volume", "liquidity"], case_sensitive=False),
     default="volume",
     show_default=True,
     help="按 24h 成交量或当前流动性排序（仅对 Polymarket 有效）。",
 )
-def list_markets(platform: str, limit: int, sort: str) -> None:
-    """显示活跃市场列表，默认按 24h 成交量排序。"""
+def list_markets(
+    platform: str,
+    limit: int,
+    sort: str,
+    category: str | None,
+    tag_slug: str | None,
+    tag_id: str | None,
+) -> None:
+    """显示活跃市场列表，支持按分类或标签过滤。"""
     sort_key = None if sort == "none" else sort
-    asyncio.run(_list_markets(platform=platform, limit=limit, sort=sort_key))
+    asyncio.run(
+        _list_markets(
+            platform=platform,
+            limit=limit,
+            sort=sort_key,
+            category=category,
+            tag_slug=tag_slug,
+            tag_id=tag_id,
+        )
+    )
+
+
+async def _list_categories(platform: str) -> None:
+    """列出指定平台当前活跃市场的分类/标签聚合信息。
+
+    目前仅对 Polymarket 有实际意义。
+    """
+    settings = Settings.load()
+    p = normalize_platform(platform)
+    pm_client, op_client = build_clients(settings)
+    try:
+        categories: dict[str, dict[str, float]] = {}
+        if p in ("polymarket", "all"):
+            pm_markets = await pm_client.list_active_markets(limit=500)
+            for m in pm_markets:
+                cat = (m.category or "uncategorized").strip()
+                key = cat or "uncategorized"
+                bucket = categories.setdefault(key, {"count": 0.0, "volume": 0.0})
+                bucket["count"] += 1
+                if m.volume is not None:
+                    bucket["volume"] += m.volume
+
+        if p in ("opinion", "all"):
+            # Opinion 目前暂未显式使用分类，保留接口结构方便未来扩展。
+            pass
+
+        if not categories:
+            console.print("[yellow]No category information available.[/yellow]")
+            return
+
+        table = Table(title="Polymarket Categories", show_lines=False)
+        table.add_column("Category")
+        table.add_column("Markets", justify="right")
+        table.add_column("24h Volume", justify="right")
+        for name, stats in sorted(categories.items(), key=lambda kv: kv[1]["volume"], reverse=True):
+            table.add_row(name, f"{int(stats['count'])}", f"{stats['volume']:.2f}")
+        console.print(table)
+    finally:
+        await asyncio.gather(pm_client.close(), op_client.close())
+
+
+@main.command("list-categories")
+@click.option("--platform", default="polymarket", show_default=True, help="polymarket|opinion|all")
+def list_categories(platform: str) -> None:
+    """列出当前活跃市场的分类/标签聚合情况。
+
+    注意：Polymarket 目前主要通过 tags 进行组织，Gamma 的
+    `category` 字段在很多市场上可能为空，因此结果中出现大量
+    \"uncategorized\" 属于上游数据的预期表现。
+    """
+    asyncio.run(_list_categories(platform=platform))
 
 
 @main.command("search-markets")
@@ -209,5 +326,4 @@ def price(market_id: str, platform: str) -> None:
     asyncio.run(_show())
 
 
-__all__ = ["list_markets", "search_markets", "orderbook", "price"]
-
+__all__ = ["list_markets", "search_markets", "orderbook", "price", "list_categories"]
