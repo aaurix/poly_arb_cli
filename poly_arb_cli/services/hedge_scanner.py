@@ -183,7 +183,9 @@ async def scan_hedged_opportunities(
                 funding_rate=funding,
                 note=note,
                 prob_source=prob_source,
-                barrier=mapping.barrier if mapping.payoff_type in {"touch", "no_touch"} else None,
+                barrier=(
+                    mapping.barrier if mapping.payoff_type in {"touch", "no_touch"} else None
+                ),
             )
         )
 

@@ -18,7 +18,7 @@ def one_touch_prob(
     drift: float = 0.0,
     direction: str = "up",
 ) -> Optional[float]:
-    """估计 one-touch 触及概率。
+    """估计 one-touch 触及概率（漂移近似）。
 
     Args:
         spot: 当前标的价格。
@@ -34,27 +34,23 @@ def one_touch_prob(
     if spot <= 0 or barrier <= 0 or years <= 0 or vol <= 0:
         return None
 
-    mu = drift
     sigma = vol
     sqrt_t = math.sqrt(years)
     if direction == "down":
-        # 对称性：下破可通过价格倒数转化为上破
-        spot, barrier = 1 / spot, 1 / barrier
+        # 下破：转换为上破的等价形式
+        gap = math.log(spot / barrier)
+        # 漂移向下则更易触及，向上则降低概率
+        drift_term = -drift * years
+    else:
+        gap = math.log(barrier / spot)
+        drift_term = drift * years
 
-    ln_ratio = math.log(spot / barrier)
-    denom = sigma * sqrt_t
-    if denom == 0:
-        return None
+    if gap <= 0:
+        return 1.0
 
-    # 参考文章中的反射公式简化版本
-    # d1/d2 与数字期权类似，但触及概率需要添加镜像项
-    d1 = (ln_ratio + (mu + 0.5 * sigma * sigma) * years) / denom
-    d2 = (ln_ratio + (mu - 0.5 * sigma * sigma) * years) / denom
-    # 漂移项补偿，避免非零漂移时的偏差
-    kappa = 2 * mu / (sigma * sigma) if sigma > 0 else 0.0
-
-    term_reflect = (barrier / spot) ** kappa
-    prob = norm_cdf(-d2) + term_reflect * norm_cdf(d1)
+    z = (gap - drift_term) / (sigma * sqrt_t)
+    # 反射原理的简化版，忽略高阶项
+    prob = 2 * (1 - norm_cdf(z))
     return max(0.0, min(1.0, prob))
 
 
