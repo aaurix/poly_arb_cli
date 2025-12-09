@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import asyncio
+import math
 from typing import Optional
 
 from ..config import Settings
@@ -91,6 +92,50 @@ class PerpClient:
             except Exception:
                 pass
 
+    async def fetch_realized_vol(
+        self,
+        symbol: str,
+        *,
+        timeframe: str = "1h",
+        lookback_days: int = 7,
+        max_candles: int = 500,
+    ) -> Optional[float]:
+        """基于 OHLCV 计算历史年化波动率。
+
+        Args:
+            symbol: ccxt 符号。
+            timeframe: K 线周期（如 1h/1d）。
+            lookback_days: 向前回溯天数。
+            max_candles: 最多抓取的 K 线数量。
+
+        Returns:
+            年化波动率，缺少数据或解析失败返回 None。
+        """
+        exchange = self._require_exchange()
+        seconds_per_bar = _timeframe_seconds(timeframe)
+        if seconds_per_bar <= 0:
+            return None
+        est_limit = int((lookback_days * 24 * 3600) / seconds_per_bar) + 1
+        limit = max(2, min(max_candles, est_limit))
+        try:
+            ohlcv = await asyncio.to_thread(exchange.fetch_ohlcv, symbol, timeframe=timeframe, limit=limit)
+        except Exception:
+            return None
+        closes = [row[4] for row in ohlcv if len(row) >= 5 and row[4]]
+        if len(closes) < 2:
+            return None
+        returns = []
+        for prev, curr in zip(closes[:-1], closes[1:]):
+            if prev <= 0 or curr <= 0:
+                continue
+            returns.append(math.log(curr / prev))
+        if len(returns) < 2:
+            return None
+        mean = sum(returns) / len(returns)
+        var = sum((r - mean) ** 2 for r in returns) / (len(returns) - 1)
+        daily_factor = 365 * 24 * 3600 / seconds_per_bar
+        return math.sqrt(var * daily_factor)
+
     def _require_exchange(self):
         """检查 ccxt 初始化状态，未就绪时抛出带上下文的错误。
 
@@ -107,3 +152,27 @@ class PerpClient:
                 "ccxt not available; install it or adjust pyproject optional deps."
             ) from self._import_error
         raise RuntimeError(f"ccxt exchange {self.exchange_id} not initialized")
+
+
+def _timeframe_seconds(tf: str) -> int:
+    """将 ccxt 风格 timeframe 转换为秒。"""
+    if not tf:
+        return 0
+    tf = tf.strip().lower()
+    unit = tf[-1]
+    value_str = tf[:-1] if unit.isalpha() else tf
+    try:
+        value = int(value_str)
+    except Exception:
+        return 0
+    if unit == "s":
+        return value
+    if unit == "m":
+        return value * 60
+    if unit == "h":
+        return value * 3600
+    if unit == "d":
+        return value * 86400
+    if unit == "w":
+        return value * 604800
+    return 0

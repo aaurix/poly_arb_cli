@@ -10,6 +10,7 @@ from typing import Iterable, List, Optional
 
 from ..clients.perp import PerpClient
 from ..clients.polymarket import PolymarketClient
+from ..services.barrier_pricing import no_touch_prob, one_touch_prob
 from ..types import HedgeMarketConfig, HedgeOpportunity, Market
 
 
@@ -39,6 +40,9 @@ def load_hedge_markets(path: Path) -> List[HedgeMarketConfig]:
                     expiry=str(item["expiry"]),
                     yes_on_above=bool(item.get("yes_on_above", True)),
                     est_vol=float(item["est_vol"]) if "est_vol" in item else None,
+                    payoff_type=str(item.get("payoff_type", "digital")),
+                    barrier=str(item.get("barrier", "up")),
+                    drift=float(item.get("drift", 0.0)),
                 )
             )
         except Exception:
@@ -54,6 +58,11 @@ async def scan_hedged_opportunities(
     pm_limit: int = 200,
     min_edge_percent: Optional[float] = None,
     default_vol: float = 1.0,
+    min_gap_sigma: float = 0.2,
+    use_realized_vol: bool = True,
+    vol_timeframe: str = "1h",
+    vol_lookback_days: int = 7,
+    vol_max_candles: int = 500,
 ) -> List[HedgeOpportunity]:
     """扫描可对冲的标的型市场，比较 PM 价格与衍生品隐含概率。
 
@@ -64,6 +73,12 @@ async def scan_hedged_opportunities(
         pm_limit: 拉取的 Polymarket 市场数量上限。
         min_edge_percent: 过滤绝对边际收益的最小阈值，None 表示不过滤。
         default_vol: 缺省年化波动率。
+        min_gap_sigma: spot 与 barrier 的最小距离（单位：sigma * sqrt(T)），
+            避免几乎必触及/必不触及导致数值不稳。
+        use_realized_vol: 是否尝试基于 OHLCV 计算历史波动率。
+        vol_timeframe: 计算波动率的 K 线周期。
+        vol_lookback_days: 向前回溯天数。
+        vol_max_candles: 拉取 K 线的最大条数。
 
     Returns:
         按绝对边际收益排序的 `HedgeOpportunity` 列表。
@@ -87,13 +102,63 @@ async def scan_hedged_opportunities(
         except Exception:
             continue
 
-        prob_above, years = _implied_prob_above(
-            spot=spot,
-            strike=mapping.strike,
-            expiry=mapping.expiry,
-            now=now,
-            vol=mapping.est_vol or default_vol,
-        )
+        prob_source = "digital"
+        prob_above: Optional[float]
+        prob: Optional[float]
+        years: float
+
+        vol = mapping.est_vol or default_vol
+        if use_realized_vol:
+            tf = mapping.vol_timeframe or vol_timeframe
+            lb_days = mapping.vol_lookback_days or vol_lookback_days
+            cache_key = (mapping.underlying_symbol, tf, lb_days)
+            if cache_key not in vol_cache:
+                vol_cache[cache_key] = await perp_client.fetch_realized_vol(
+                    mapping.underlying_symbol,
+                    timeframe=tf,
+                    lookback_days=lb_days,
+                    max_candles=vol_max_candles,
+                )
+            if vol_cache[cache_key]:
+                vol = vol_cache[cache_key] or vol
+
+        if mapping.payoff_type == "touch":
+            prob, years = _implied_touch_prob(
+                spot=spot,
+                barrier=mapping.strike,
+                expiry=mapping.expiry,
+                now=now,
+                vol=vol,
+                drift=mapping.drift,
+                direction=mapping.barrier,
+                min_gap_sigma=min_gap_sigma,
+            )
+            prob_above = prob
+            prob_source = "touch"
+        elif mapping.payoff_type == "no_touch":
+            prob, years = _implied_touch_prob(
+                spot=spot,
+                barrier=mapping.strike,
+                expiry=mapping.expiry,
+                now=now,
+                vol=vol,
+                drift=mapping.drift,
+                direction=mapping.barrier,
+                min_gap_sigma=min_gap_sigma,
+                no_touch=True,
+            )
+            prob_above = prob
+            prob_source = "no_touch"
+        else:
+            prob_above, years = _implied_prob_above(
+                spot=spot,
+                strike=mapping.strike,
+                expiry=mapping.expiry,
+                now=now,
+                vol=vol,
+            )
+            prob_source = "digital"
+
         if prob_above is None:
             continue
 
@@ -117,6 +182,8 @@ async def scan_hedged_opportunities(
                 expiry=mapping.expiry,
                 funding_rate=funding,
                 note=note,
+                prob_source=prob_source,
+                barrier=mapping.barrier if mapping.payoff_type in {"touch", "no_touch"} else None,
             )
         )
 
@@ -181,3 +248,52 @@ def _norm_cdf(x: float) -> float:
         累积概率值。
     """
     return 0.5 * (1.0 + math.erf(x / math.sqrt(2.0)))
+
+
+def _implied_touch_prob(
+    spot: float,
+    barrier: float,
+    expiry: str,
+    now: datetime,
+    vol: float,
+    drift: float,
+    direction: str,
+    min_gap_sigma: float,
+    no_touch: bool = False,
+) -> tuple[Optional[float], float]:
+    """计算触及/未触及概率。
+
+    Args:
+        spot: 当前标的价格。
+        barrier: 触及阈值。
+        expiry: 到期时间。
+        now: 当前时间。
+        vol: 年化波动率。
+        drift: 年化漂移。
+        direction: up/down。
+        min_gap_sigma: 最小距离筛选（单位 sigma sqrt(T)）。
+        no_touch: True 返回未触及概率，False 返回触及概率。
+
+    Returns:
+        (概率, 剩余年份)。失败时概率为 None。
+    """
+    expiry_dt = _parse_expiry(expiry)
+    if expiry_dt is None or spot <= 0 or barrier <= 0:
+        return None, 0.0
+
+    seconds = (expiry_dt - now).total_seconds()
+    if seconds <= 0:
+        return None, 0.0
+    years = seconds / (365.0 * 24 * 3600)
+    sigma = max(vol, 1e-6)
+    # 筛掉距离过近导致数值不稳的情况
+    gap = abs(math.log(spot / barrier))
+    if gap < min_gap_sigma * sigma * math.sqrt(years):
+        return None, years
+
+    if no_touch:
+        prob = no_touch_prob(spot, barrier, years, sigma, drift=drift, direction=direction)
+    else:
+        prob = one_touch_prob(spot, barrier, years, sigma, drift=drift, direction=direction)
+    return prob, years
+    vol_cache: dict[tuple[str, str, int], Optional[float]] = {}

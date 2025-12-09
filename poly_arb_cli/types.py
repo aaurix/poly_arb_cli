@@ -150,6 +150,9 @@ class HedgeMarketConfig:
         expiry: 事件到期时间，ISO8601 字符串（UTC）。
         yes_on_above: YES 是否代表价格高于阈值。
         est_vol: 预设年化波动率，缺省时使用全局默认。
+        payoff_type: 收益类型，支持数字（到期结算）和触及（one-touch/no-touch）。
+        barrier: 触及方向，上/下。
+        drift: 标的年化漂移，用于触及定价，默认 0。
     """
 
     market_id: str
@@ -158,6 +161,11 @@ class HedgeMarketConfig:
     expiry: str
     yes_on_above: bool = True
     est_vol: Optional[float] = None
+    payoff_type: str = "digital"  # digital | touch | no_touch
+    barrier: str = "up"  # up | down
+    drift: float = 0.0
+    vol_lookback_days: Optional[int] = None
+    vol_timeframe: Optional[str] = None
 
 
 @dataclass
@@ -176,6 +184,8 @@ class HedgeOpportunity:
         expiry: 到期时间（ISO 字符串）。
         funding_rate: 当前资金费率（若有）。
         note: 额外提示，如波动率来源、时间过短等。
+        prob_source: 概率来源（digital/touch/no_touch）。
+        barrier: 若为触及类机会，记录 barrier 方向。
     """
 
     market: Market
@@ -189,3 +199,5 @@ class HedgeOpportunity:
     expiry: str
     funding_rate: Optional[float] = None
     note: Optional[str] = None
+    prob_source: str = "digital"
+    barrier: Optional[str] = None

@@ -79,7 +79,8 @@ class PolymarketClient:
 
         results: List[Market] = []
         for mk in markets_raw[:limit]:
-            market_id = mk.get("id") or mk.get("conditionId") or mk.get("marketHash") or mk.get("_id")
+            condition_id = mk.get("conditionId")
+            market_id = mk.get("id") or condition_id or mk.get("marketHash") or mk.get("_id")
             title = mk.get("question") or mk.get("title") or mk.get("name") or str(market_id)
             # 成交量与流动性字段（采用 24 小时 CLOB 成交量与当前 CLOB 流动性）
             volume_24h = (
@@ -118,6 +119,7 @@ class PolymarketClient:
                     platform=Platform.POLYMARKET,
                     market_id=str(market_id),
                     title=str(title),
+                     condition_id=str(condition_id) if condition_id else None,
                      volume=vol_val,
                      liquidity=liq_val,
                     yes_token_id=str(yes_token) if yes_token else None,

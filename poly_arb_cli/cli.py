@@ -129,6 +129,7 @@ async def _scan_hedge(
             pm_limit=pm_limit,
             min_edge_percent=min_edge if min_edge is not None else settings.hedge_min_edge_percent,
             default_vol=default_vol if default_vol is not None else settings.hedge_default_vol,
+            min_gap_sigma=settings.hedge_min_gap_sigma,
         )
         _print_hedge_opportunities(opportunities)
         log_opportunities(
@@ -216,6 +217,7 @@ def _print_hedge_opportunities(opportunities: list[HedgeOpportunity]) -> None:
     table.add_column("Market ID", overflow="fold")
     table.add_column("Title", overflow="fold")
     table.add_column("Underlying", style="magenta")
+    table.add_column("Type", justify="left")
     table.add_column("PM YES", justify="right")
     table.add_column("Implied YES", justify="right")
     table.add_column("Edge %", justify="right")
@@ -230,6 +232,7 @@ def _print_hedge_opportunities(opportunities: list[HedgeOpportunity]) -> None:
             opp.market.market_id,
             opp.market.title,
             opp.underlying_symbol,
+            f"{opp.prob_source}/{opp.barrier or '-'}",
             f"{opp.pm_yes:.4f}",
             f"{opp.implied_yes:.4f}",
             f"[{edge_style}]{opp.edge_percent:.2f}[/{edge_style}]",
@@ -333,7 +336,14 @@ async def _search_markets(platform: str, query: str, limit: int, search_limit: i
         rows: list[Market] = []
         if p in ("polymarket", "all"):
             pm_markets = await pm_client.list_active_markets(limit=search_limit)
-            rows.extend(m for m in pm_markets if _matches_query(m.title, query))
+            for m in pm_markets:
+                # 同时在标题、数值 ID、condition_id 上做模糊匹配
+                if (
+                    _matches_query(m.title, query)
+                    or query.lower() in (m.market_id or "").lower()
+                    or (getattr(m, "condition_id", "") and query.lower() in m.condition_id.lower())
+                ):
+                    rows.append(m)
         if p in ("opinion", "all"):
             op_markets = await op_client.list_active_markets(limit=search_limit)
             rows.extend(m for m in op_markets if _matches_query(m.title, query))
@@ -578,7 +588,11 @@ def trades_tape(min_notional: float, interval: int, window: int) -> None:
         pm_markets = await pm_client.list_active_markets(limit=200)
         asset_ids: set[str] = set()
         for m in pm_markets:
-            condition_to_title[m.market_id] = m.title
+            # 使用 “数值 ID | 标题” 的展示形式，并同时支持按 market_id 与 condition_id 查询。
+            display_title = f"{m.market_id} | {m.title}"
+            condition_to_title[m.market_id] = display_title
+            if getattr(m, "condition_id", None):
+                condition_to_title[m.condition_id] = display_title
             if m.yes_token_id:
                 asset_ids.add(m.yes_token_id)
                 token_to_outcome[m.yes_token_id] = "YES"

@@ -36,6 +36,11 @@ class Settings(BaseSettings):
 
     hedge_min_edge_percent: float = 2.0
     hedge_default_vol: float = 1.0  # 年化波动率缺省值，用于概率近似
+    hedge_min_gap_sigma: float = 0.2  # spot 与 barrier 距离的最小 σ*sqrt(T)
+    hedge_use_realized_vol: bool = True
+    hedge_vol_timeframe: str = "1h"
+    hedge_vol_lookback_days: int = 7
+    hedge_vol_max_candles: int = 500
 
     scan_interval_seconds: int = 60
     max_trade_size: float = 50.0
