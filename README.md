@@ -178,6 +178,52 @@ poetry run poly-arb <command> [options...]
   - 默认会尝试通过 ccxt 抓取 OHLCV 计算历史波动率，可用 `--no-realized-vol` 关闭；也可用 `--vol` 提供固定年化波动率；
   - 细节见 `poly_arb_cli/services/hedge_scanner.py` 与 `data/underlying_map.sample.json`。
 
+- **tail-watch**：Polymarket 尾盘扫货（单盘时间价值套利）监控
+
+  ```bash
+  poetry run poly-arb tail-watch \
+    --interval 30 \
+    --limit 500 \
+    --use-ws \
+    --min-price 0.95 \
+    --min-yield 0.1 \
+    --max-hours 72 \
+    --min-notional 5000
+  ```
+
+  核心逻辑（见 `poly_arb_cli/services/tail_scanner.py`）：
+
+  - 从 Gamma 拉取活跃市场，并解析每个市场的结束/结算时间 `end_date`；
+  - 仅保留：
+    - 有 YES token（可在 CLOB 上直接扫货）；
+    - 距离结算时间在 `tail_max_hours_to_resolve` 小时以内（默认 72h）；
+    - YES 最优买入价 `>= tail_min_yes_price`（默认 0.95）；
+    - 名义扫货金额 `>= tail_min_notional`（默认 5000 美元）；
+    - 预期收益率（忽略时间价值） `>= tail_min_yield_percent`；
+    - 年化收益率（按剩余时间折算） `>= tail_min_annualized_yield_percent`。
+  - 预期收益率估算：
+    - 假设结算时 YES 收益为 1（扣除手续费后的净值为 `1 - fee`）；
+    - 毛利约为 `(1 - price) * (1 - tail_fee_rate)`；
+    - 预期收益率 ≈ `((1 - price) * (1 - fee) / price) * 100%`；
+    - 年化收益率 ≈ `预期收益率 * 365 / (剩余天数)`（简单线性折算）。
+  - WebSocket 行情：
+    - 默认开启 `--use-ws`，使用 `PolymarketStreamState + MarketWsFeed` 维护本地 OrderBook；
+    - 仅当 WS 尚无盘口数据时才回退到 CLOB REST `get_orderbook`。
+
+  表格字段说明：
+
+  - `YES Price`：当前 YES 最优买入价；
+  - `Size`：在最大扫单数量 / 盘口前几档深度限制下可扫的 YES 数量；
+  - `Notional`：`YES Price * Size`；
+  - `Yield %`：单次尾盘扫货的预期收益率（不含时间价值）；
+  - `Ann. %`：按剩余时间折算的简单年化收益率（辅助识别更优套利机会）；
+  - `Hours`：距离结算的剩余小时数；
+  - `Flags`：风险标签，例如：
+    - `long_horizon`：剩余时间较长（> 24 小时），黑天鹅风险暴露时间更长；
+    - `thin_book`：盘口较薄，扫单时可能存在额外滑点。
+
+  该命令只负责识别和展示时间价值套利机会，不会自动下单。建议在实盘中结合自身仓位管理、黑天鹅风险偏好以及上游赛事实时信息进行综合判断。
+
 ### 2.5 账户 / 持仓
 
 - **positions**：查看账户余额/持仓

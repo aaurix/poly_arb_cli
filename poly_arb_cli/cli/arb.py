@@ -20,6 +20,7 @@ from ..clients.perp import PerpClient
 from ..config import Settings
 from ..services.hedge_scanner import load_hedge_markets, scan_hedged_opportunities
 from ..services.matcher import match_markets
+from ..services.rebalance_monitor import RebalanceMonitor
 from ..services.scanner import scan_once
 from ..storage import log_opportunities, timestamp
 from ..types import ArbOpportunity, HedgeOpportunity
@@ -149,6 +150,97 @@ async def _preview_matches(limit: int, threshold: float) -> None:
         console.print(table)
     finally:
         await asyncio.gather(pm_client.close(), op_client.close())
+
+
+async def _rebalance_watch_loop(
+    interval: int,
+    limit: int,
+    min_abs_move: float,
+    min_notional: float,
+    max_age_seconds: int,
+) -> None:
+    """持续监控 Polymarket 市场再平衡机会并在终端展示。
+
+    Args:
+        interval: 两次扫描之间的时间间隔（秒）。
+        limit: 监控的 Polymarket 活跃市场数量上限。
+        min_abs_move: 触发再平衡信号的最小绝对价格偏离（例如 0.15）。
+        min_notional: 最近一笔成交的最小名义金额（美元）。
+        max_age_seconds: 最近成交允许的最大时间间隔（秒）。
+    """
+    from rich.live import Live
+    from rich.table import Table
+
+    settings = Settings.load()
+    from ..clients.polymarket import PolymarketClient
+    from ..connectors.polymarket_ws import MarketWsFeed, PolymarketStreamState
+
+    pm_client = PolymarketClient(settings)
+    state = PolymarketStreamState()
+    monitor = RebalanceMonitor()
+
+    try:
+        pm_markets = await pm_client.list_active_markets(limit=limit)
+        pm_markets = [m for m in pm_markets if m.platform.value == "polymarket"]
+
+        asset_ids: set[str] = set()
+        for m in pm_markets:
+            if m.yes_token_id:
+                asset_ids.add(m.yes_token_id)
+            if m.no_token_id:
+                asset_ids.add(m.no_token_id)
+
+        feed = MarketWsFeed(settings, state, asset_ids)
+        feed_task = asyncio.create_task(feed.run())
+
+        try:
+            with Live(refresh_per_second=4, console=console) as live:
+                while True:
+                    signals = monitor.detect_signals(
+                        state,
+                        pm_markets,
+                        min_abs_move=min_abs_move,
+                        min_notional=min_notional,
+                        max_age_seconds=max_age_seconds,
+                    )
+
+                    table = Table(
+                        title="Rebalance Signals (Polymarket)",
+                        header_style="bold cyan",
+                        show_lines=False,
+                        row_styles=["dim", ""],
+                    )
+                    table.add_column("Market ID")
+                    table.add_column("Title")
+                    table.add_column("Direction")
+                    table.add_column("Current YES", justify="right")
+                    table.add_column("Baseline YES", justify="right")
+                    table.add_column("Delta", justify="right")
+                    table.add_column("Last Notional", justify="right")
+                    table.add_column("Reason")
+
+                    for sig in signals:
+                        table.add_row(
+                            sig.market.market_id,
+                            sig.market.title,
+                            sig.direction,
+                            f"{sig.current_yes:.4f}",
+                            f"{sig.baseline_yes:.4f}",
+                            f"{sig.delta:.4f}",
+                            f"{sig.last_trade_notional:.2f}",
+                            sig.reason or "",
+                        )
+
+                    live.update(table)
+                    await asyncio.sleep(interval)
+        finally:
+            feed_task.cancel()
+            try:
+                await feed_task
+            except Exception:
+                pass
+    finally:
+        await pm_client.close()
 
 
 @main.command("scan-arb")
@@ -315,5 +407,53 @@ def run_bot(interval: int, threshold: float, use_ws: bool) -> None:
     asyncio.run(_loop())
 
 
-__all__ = ["scan_arb", "scan_hedge", "match_preview", "run_bot"]
+@main.command("monitor-rebalance")
+@click.option("--interval", default=5, show_default=True, type=int, help="Seconds between scans.")
+@click.option(
+    "--limit",
+    default=50,
+    show_default=True,
+    type=int,
+    help="Max active Polymarket markets to monitor.",
+)
+@click.option(
+    "--min-abs-move",
+    default=0.15,
+    show_default=True,
+    type=float,
+    help="Minimum absolute YES price deviation to trigger signal (e.g. 0.15).",
+)
+@click.option(
+    "--min-notional",
+    default=500.0,
+    show_default=True,
+    type=float,
+    help="Minimum notional of the last trade (USDC) to consider as whale/activity.",
+)
+@click.option(
+    "--max-age",
+    default=300,
+    show_default=True,
+    type=int,
+    help="Maximum age in seconds of the last trade to treat as a short-term shock.",
+)
+def monitor_rebalance(
+    interval: int,
+    limit: int,
+    min_abs_move: float,
+    min_notional: float,
+    max_age: int,
+) -> None:
+    """实时监控 Polymarket 市场再平衡机会，仅输出监控信号不自动下单。"""
+    asyncio.run(
+        _rebalance_watch_loop(
+            interval=interval,
+            limit=limit,
+            min_abs_move=min_abs_move,
+            min_notional=min_notional,
+            max_age_seconds=max_age,
+        )
+    )
 
+
+__all__ = ["scan_arb", "scan_hedge", "match_preview", "run_bot", "monitor_rebalance"]

@@ -7,7 +7,12 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    """Runtime configuration loaded from env or .env file."""
+    """运行时配置模型，从环境变量或 .env 加载。
+
+    本类集中管理 CLI/服务所需的外部依赖配置，例如
+    Polymarket/Opinion API 端点、CLOB 凭证、对冲与
+    套利参数以及日志级别等。
+    """
 
     # 本地数据目录，用于存放缓存/向量索引等构建产物
     data_dir: Path = Path("data")
@@ -50,6 +55,16 @@ class Settings(BaseSettings):
     hedge_vol_timeframe: str = "1h"
     hedge_vol_lookback_days: int = 7
     hedge_vol_max_candles: int = 500
+
+    # 尾盘扫货策略相关阈值
+    tail_min_yes_price: float = 0.95
+    tail_focus_price: float = 0.997
+    tail_max_hours_to_resolve: float = 72.0
+    tail_min_notional: float = 5000.0
+    tail_min_yield_percent: float = 0.1
+    tail_min_annualized_yield_percent: float = 20.0
+    tail_max_sweep_size: float = 50.0
+    tail_fee_rate: float = 0.02  # 预估结算费用占比
 
     scan_interval_seconds: int = 60
     max_trade_size: float = 50.0

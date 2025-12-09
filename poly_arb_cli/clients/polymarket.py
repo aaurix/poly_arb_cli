@@ -109,6 +109,8 @@ class PolymarketClient:
                 liq_val = float(liquidity) if liquidity is not None else None
             except Exception:
                 liq_val = None
+            # 事件结束/结算时间：不同版本 Gamma 可能使用 endDate / end_time / closeDate 等字段。
+            end_date = _parse_market_end_date(mk)
             # clobTokenIds is a stringified list in Gamma; parse if present.
             yes_token = None
             no_token = None
@@ -131,6 +133,7 @@ class PolymarketClient:
                     market_id=str(market_id),
                     title=str(title),
                     condition_id=str(condition_id) if condition_id else None,
+                    end_date=end_date,
                     category=category,
                     volume=vol_val,
                     liquidity=liq_val,
@@ -434,3 +437,72 @@ def _best_price(orderbook: OrderBook, side: str) -> float:
     """根据方向返回盘口最优价（买取最优卖价，卖取最优买价）。"""
     level = orderbook.best_ask() if side == "buy" else orderbook.best_bid()
     return float(level.price) if level else 1.0
+
+
+def _parse_market_end_date(data: dict) -> Optional[str]:
+    """从 Gamma 市场字典中提取结束时间并标准化为 ISO8601 字符串。
+
+    Gamma 在不同版本中可能使用 ``endDate``、``end_time``、``closeDate``、
+    ``resolveTime`` 等字段来表示市场结束或结算时间。本函数会按常见字段
+    顺序尝试读取，并将 Unix 时间戳或可解析的字符串统一转换为 ISO8601。
+
+    Args:
+        data: 单个 Gamma 市场的原始字典。
+
+    Returns:
+        ISO8601 格式的 UTC 时间字符串；若无法解析则返回 ``None``。
+    """
+    from datetime import datetime, timezone
+
+    candidates = [
+        "endDate",
+        "end_date",
+        "endTime",
+        "end_time",
+        "closeDate",
+        "close_date",
+        "resolveTime",
+        "resolve_time",
+    ]
+    raw = None
+    for key in candidates:
+        if key in data and data[key]:
+            raw = data[key]
+            break
+    if raw is None:
+        return None
+
+    # Unix 时间戳（秒或毫秒）
+    try:
+        if isinstance(raw, (int, float)):
+            ts = float(raw)
+            # 认为大于 10^11 的为毫秒级时间戳
+            if ts > 1e11:
+                ts /= 1000.0
+            dt = datetime.fromtimestamp(ts, tz=timezone.utc)
+            return dt.isoformat()
+    except Exception:
+        pass
+
+    # 字符串：尝试直接解析或补充时区信息
+    if isinstance(raw, str):
+        txt = raw.strip()
+        # 若已经是 ISO8601，优先直接返回
+        try:
+            dt = datetime.fromisoformat(txt.replace("Z", "+00:00"))
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return dt.astimezone(timezone.utc).isoformat()
+        except Exception:
+            pass
+        # 作为备选方案，再尝试解析为整数时间戳
+        try:
+            ts = float(txt)
+            if ts > 1e11:
+                ts /= 1000.0
+            dt = datetime.fromtimestamp(ts, tz=timezone.utc)
+            return dt.isoformat()
+        except Exception:
+            return None
+
+    return None

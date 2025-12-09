@@ -233,3 +233,33 @@ class HedgeOpportunity:
     note: Optional[str] = None
     prob_source: str = "digital"
     barrier: Optional[str] = None
+
+
+@dataclass
+class RebalanceSignal:
+    """描述单个市场再平衡监控信号的数据类。
+
+    市场再平衡套利关注价格在短时间内偏离自身均衡水平（如
+    最近均价或平滑后的基线价格）的情形。本数据类仅承载监
+    控信号本身，不直接触发下单逻辑，方便 CLI 或上层策略
+    进行展示与二次过滤。
+
+    Attributes:
+        market: 触发信号的 Polymarket 市场。
+        direction: 建议方向，例如 ``short_yes`` 或 ``short_no``。
+        current_yes: 当前估算的 YES 价格（通常取 bid/ask 中值）。
+        baseline_yes: 监控窗口内平滑后的 YES 基线价格。
+        delta: 当前价格与基线的差值（current_yes - baseline_yes）。
+        last_trade_notional: 最近一笔成交的名义金额，用于识别鲸鱼冲击。
+        window_seconds: 监控窗口长度（秒），用于描述信号参考的时间尺度。
+        reason: 人类可读的简要说明，便于在终端或日志中查看。
+    """
+
+    market: Market
+    direction: str
+    current_yes: float
+    baseline_yes: float
+    delta: float
+    last_trade_notional: float
+    window_seconds: int
+    reason: Optional[str] = None
