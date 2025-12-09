@@ -15,8 +15,8 @@ class Settings(BaseSettings):
     # LLM / Embedding 相关配置（OpenAI 兼容）
     openai_api_key: Optional[str] = None
     openai_base_url: Optional[str] = None
-    openai_model: str = "gpt-4o-mini"
-    embedding_model: str = "text-embedding-3-large"
+    openai_model: str = "deepseek/deepseek-chat-v3.1"
+    embedding_model: str = "qwen/qwen3-embedding-8b"
 
     polymarket_private_key: Optional[str] = None
     polymarket_api_key: Optional[str] = None

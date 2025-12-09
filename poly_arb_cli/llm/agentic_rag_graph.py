@@ -13,13 +13,13 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Any, Literal, TypedDict
+import json
+from typing import Any, TypedDict
 
 from langchain_openai import ChatOpenAI
 from langchain_core.documents import Document
 from langchain_core.vectorstores import VectorStore
 from langgraph.graph import END, START, StateGraph
-from pydantic import BaseModel, Field
 
 from ..config import Settings
 from .vectorstore import build_docs_vectorstore, build_markets_vectorstore
@@ -35,15 +35,6 @@ class RagState(TypedDict):
     platform_filter: str | None
     docs: list[Document]
     context: str
-
-
-class RouteDecision(BaseModel):
-    """用于分类节点的结构化输出。"""
-
-    route: Literal["docs", "markets"] = Field(description="问题更像文档问答还是市场研究")
-    platform: str | None = Field(
-        default=None, description="可选的平台过滤，如 polymarket/opinion/all"
-    )
 
 
 def _load_docs_store(settings: Settings) -> VectorStore:
@@ -77,33 +68,53 @@ def build_agentic_rag_graph() -> Any:
 
     docs_retriever = docs_store.as_retriever(search_kwargs={"k": 6})
 
-    router = llm.with_structured_output(RouteDecision)
-    grader = llm.with_structured_output(
-        BaseModel.model_construct,  # placeholder, see grade_node for custom logic
-    )
-
     def classify_node(state: RagState) -> RagState:
-        """使用结构化输出分类问题类型与平台过滤。"""
+        """分类问题类型与平台过滤（避免强制 JSON 模式）。"""
 
         question = state.get("question") or state["messages"][-1].get("content", "")
-        decision = router.invoke(
-            [
-                {
-                    "role": "system",
-                    "content": (
-                        "判断用户的问题更像文档问答还是市场研究："
-                        "若涉及 CLI 用法、架构、配置 -> docs；"
-                        "若涉及市场、价格、盘口、套利 -> markets。"
-                        "若问题显式提到 polymarket/opinion，也写入 platform；否则 None。"
-                    ),
-                },
-                {"role": "user", "content": question},
-            ]
+
+        # 先做一个简单 heuristics，作为 JSON 解析失败时的兜底。
+        q_lower = question.lower()
+        prefer_docs = any(
+            key in q_lower for key in ["readme", "architecture", "架构", "命令", "cli", "文档"]
         )
+        default_route = "docs" if prefer_docs else "markets"
+
+        route = default_route
+        platform: str | None = None
+
+        prompt = (
+            "你是一个路由器，负责判断用户问题属于哪一类：\n"
+            "- 若问题主要是关于项目 README、架构、配置、命令用法，route=docs；\n"
+            "- 若问题主要是关于市场、价格、盘口、成交量、套利，route=markets。\n"
+            "同时，如果问题中明显提到了 polymarket 或 opinion，可以在 platform 中标记对应平台，"
+            "否则 platform 设为 null。\n\n"
+            "请严格输出一个 JSON，对象格式如下（不要添加任何说明文字）：\n"
+            '{"route": "docs|markets", "platform": "polymarket|opinion|null"}\n\n'
+            f"用户问题：{question}\n"
+        )
+
+        try:
+            resp = llm.invoke(prompt)
+            text = (getattr(resp, "content", "") or "").strip()
+            data = json.loads(text)
+            route = str(data.get("route") or default_route).lower()
+            platform_raw = data.get("platform")
+            if isinstance(platform_raw, str):
+                platform_raw = platform_raw.strip().lower()
+                platform = platform_raw if platform_raw in {"polymarket", "opinion"} else None
+        except Exception:
+            # 解析失败时沿用 heuristics
+            route = default_route
+            platform = None
+
+        if route not in {"docs", "markets"}:
+            route = default_route
+
         return {
             **state,
-            "route": decision.route,
-            "platform_filter": (decision.platform or None),
+            "route": route,
+            "platform_filter": platform,
             "question": question,
             "rewritten_question": None,
             "docs": [],
@@ -207,10 +218,6 @@ def build_agentic_rag_graph() -> Any:
         messages.append({"role": "assistant", "content": resp.content})
         return {**state, "messages": messages}
 
-    class AnswerCheck(BaseModel):
-        supported: bool = Field(description="回答是否被上下文充分支持")
-        reason: str = Field(description="简要说明")
-
     def answer_check_node(state: RagState) -> RagState:
         """检查回答是否被上下文支持，若不支持则提示信息不足。"""
 
@@ -220,25 +227,26 @@ def build_agentic_rag_graph() -> Any:
         last = messages[-1].get("content", "")
         context = state.get("context") or ""
 
-        checker = llm.with_structured_output(AnswerCheck)
-        decision = checker.invoke(
-            [
-                {
-                    "role": "system",
-                    "content": "判断回答是否完全基于给定上下文，不足则标记为不支持。",
-                },
-                {
-                    "role": "user",
-                    "content": f"上下文:\n{context}\n\n回答:\n{last}",
-                },
-            ]
+        # 为了兼容任意 OpenAI 兼容后端，这里不使用 structured_output，
+        # 而是让模型返回简单的 YES/NO + 原因，并手动解析。
+        prompt = (
+            "请判断下面的回答是否被给定的上下文充分支持。\n"
+            "如果支持，请以 'YES: 原因' 格式回答；如果不支持，请以 'NO: 原因' 格式回答。\n\n"
+            f"上下文:\n{context}\n\n"
+            f"回答:\n{last}\n"
         )
-        if not decision.supported:
+        resp = llm.invoke(prompt)
+        text = (getattr(resp, "content", "") or "").strip()
+        verdict = text.split(":", 1)[0].strip().upper()
+        reason = text.split(":", 1)[1].strip() if ":" in text else ""
+
+        if verdict.startswith("NO"):
             fallback = (
                 "根据提供的上下文信息不足，无法给出可靠结论。"
-                f"原因: {decision.reason}"
+                f"原因: {reason or '回答与上下文不一致或缺乏支撑。'}"
             )
             messages[-1]["content"] = fallback
+
         return {**state, "messages": messages}
 
     graph_builder = StateGraph(RagState)

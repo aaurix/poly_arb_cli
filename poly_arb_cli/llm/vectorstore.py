@@ -10,6 +10,10 @@ import os
 from pathlib import Path
 from typing import Iterable, Optional
 
+# 关闭 Chroma 的匿名遥测，避免终端中出现噪音日志。
+os.environ.setdefault("CHROMA_TELEMETRY_ENABLED", "false")
+os.environ.setdefault("ANONYMIZED_TELEMETRY", "False")
+
 from langchain_community.document_loaders import TextLoader
 from langchain_community.vectorstores import Chroma
 from langchain_core.vectorstores import VectorStore
