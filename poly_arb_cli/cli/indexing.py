@@ -43,18 +43,51 @@ def build_docs_index(persist_dir: Path | None) -> None:
     show_default=False,
     help="Chroma 持久化目录，缺省使用 data/chroma_markets。",
 )
-def build_markets_index(limit: int, persist_dir: Path | None) -> None:
+@click.option(
+    "--sort",
+    type=click.Choice(["none", "volume", "liquidity"], case_sensitive=False),
+    default="volume",
+    show_default=True,
+    help="索引前是否按成交量/流动性排序（优先索引活跃市场）。",
+)
+@click.option(
+    "--min-volume",
+    default=None,
+    type=float,
+    show_default=False,
+    help="24h 成交量下限，低于该值的市场不进入索引。",
+)
+@click.option(
+    "--min-liquidity",
+    default=None,
+    type=float,
+    show_default=False,
+    help="流动性下限，低于该值的市场不进入索引。",
+)
+def build_markets_index(
+    limit: int,
+    persist_dir: Path | None,
+    sort: str,
+    min_volume: float | None,
+    min_liquidity: float | None,
+) -> None:
     """构建市场语义索引（跨平台市场检索用）。"""
 
     async def _run() -> None:
         settings = Settings.load()
         target = persist_dir or settings.ensure_data_dir() / "chroma_markets"
         target.mkdir(parents=True, exist_ok=True)
-        await build_markets_vectorstore(settings=settings, limit=limit, persist_dir=target)
+        await build_markets_vectorstore(
+            settings=settings,
+            limit=limit,
+            persist_dir=target,
+            sort_by=None if sort == "none" else sort,
+            min_volume=min_volume,
+            min_liquidity=min_liquidity,
+        )
         console.print(f"[green]Markets index built at {target}[/green]")
 
     asyncio.run(_run())
 
 
 __all__ = ["build_docs_index", "build_markets_index"]
-

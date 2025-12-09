@@ -1,6 +1,9 @@
-"""LangChain-based tools and agent builders."""
+"""LLM Agent 入口。
 
-from .agent import build_agent, run_question
-from .tools import default_tools
+当前仅暴露 CLI 使用的 `run_question`，其内部统一通过
+LangGraph Agentic RAG 图（Graph + retriever + LLM）执行。
+"""
 
-__all__ = ["build_agent", "run_question", "default_tools"]
+from .agent import run_question
+
+__all__ = ["run_question"]

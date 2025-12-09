@@ -200,38 +200,41 @@ poetry run poly-arb <command> [options...]
   - 以 Textual 构建的终端 UI，展示套利机会列表；
   - 使用 `scan_once` 作为数据源。
 
-- **agent**：基于 LangChain 1.x / LangGraph 的多模式 Agent / RAG
+- **agent**：基于 LangChain 1.x / LangGraph 的 Agentic RAG（Graph + retriever + LLM）
 
   ```bash
-  # 自动模式（文档关键词走 RAG，其余走基础工具）
+  # 自动模式（文档 / 市场统一由 Agentic RAG Graph 判定）
   poetry run poly-arb agent "列出成交量最大的 Polymarket 市场"
 
-  # 强制文档 RAG（2-step）
+  # 强制偏向文档问答
   poetry run poly-arb agent "agent 命令怎么用" --mode docs
 
-  # 基础工具 Agent（list/orderbook 等）
-  poetry run poly-arb agent "显示 516706 的盘口" --mode tools
-
-  # 市场语义检索 + 工具 Agent
+  # 强制偏向市场研究
   poetry run poly-arb agent "找和 isreal-lebanon 相关的市场" --mode markets
 
-  # LangGraph Agentic RAG（包含 classify→rewrite→retrieve→grade→answer→check）
+  # 显式指定使用 LangGraph Agentic RAG（包含 classify→rewrite→retrieve→grade→answer→check）
   poetry run poly-arb agent "解释 run-bot 参数" --mode graph
   ```
 
   模式说明：
 
-  - `docs`：文档 RAG（2-step），严格依据 README/docs 回答，不足则说不知道；
-  - `tools`：旧版工具型 Agent（只读查询 list/orderbook）；
-  - `markets`：语义检索市场 + 行情工具（跨平台）；
-  - `graph`：LangGraph Agentic RAG，自动分类 docs/markets，并含 query rewrite/grade/answer check；
-  - `auto`（默认）：含文档关键词时走文档 RAG，否则走工具型 Agent。
+  - `docs`：在 Graph 中将 route 提示为 docs，偏向文档问答；
+  - `markets`：在 Graph 中将 route 提示为 markets，偏向市场研究；
+  - `graph`：显式使用 LangGraph Agentic RAG（与 auto 类似，但不做额外 heuristics）；
+  - `auto`（默认）：由 classify 节点自动判定 docs/markets，若问题包含文档关键词则偏向 docs。
 
   索引构建（建议先跑）：
 
   ```bash
-  poetry run poly-arb build-docs-index          # 构建文档向量索引（data/chroma_docs）
-  poetry run poly-arb build-markets-index --limit 2000  # 构建市场语义索引（data/chroma_markets）
+  # 构建文档向量索引（data/chroma_docs）
+  poetry run poly-arb build-docs-index
+
+  # 构建市场语义索引（data/chroma_markets），优先索引活跃市场
+  poetry run poly-arb build-markets-index \
+    --limit 2000 \
+    --sort volume \        # 或 liquidity
+    --min-volume 1000 \    # 可选：过滤 24h 成交量 < 1000 的市场
+    --min-liquidity 500    # 可选：过滤流动性 < 500 的市场
   ```
 
   模型与 Embeddings：

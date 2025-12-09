@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Iterable, Optional
 
@@ -117,6 +118,8 @@ async def build_markets_vectorstore(
     limit: int = 1000,
     persist_dir: Path | None = None,
     sort_by: str | None = "volume",
+    min_volume: Optional[float] = None,
+    min_liquidity: Optional[float] = None,
 ) -> VectorStore:
     """构建 Polymarket/Opinion 市场的语义向量索引。
 
@@ -124,7 +127,9 @@ async def build_markets_vectorstore(
         settings: 可选配置对象，缺省时自动从环境加载。
         limit: 每个平台最大索引的市场数量。
         persist_dir: Chroma 持久化目录，若为空则仅驻留内存。
-        sort_by: 允许按字段排序（目前支持 "volume"），用于优先索引活跃度高的市场。
+        sort_by: 允许按字段排序（支持 "volume" 或 "liquidity"），用于优先索引活跃度高的市场。
+        min_volume: 24h 成交量下限，低于该值的市场不进入索引。
+        min_liquidity: 流动性下限，低于该值的市场不进入索引。
 
     Returns:
         构建完成的 VectorStore 对象。
@@ -146,27 +151,35 @@ async def build_markets_vectorstore(
     all_markets.extend(pm_markets)
     all_markets.extend(op_markets)
 
+    # 先按阈值过滤，再排序
+    if min_volume is not None:
+        all_markets = [m for m in all_markets if (m.volume or 0.0) >= min_volume]
+    if min_liquidity is not None:
+        all_markets = [m for m in all_markets if (m.liquidity or 0.0) >= min_liquidity]
+
     if sort_by == "volume":
         all_markets.sort(key=lambda m: (m.volume or 0.0), reverse=True)
-        # 若 limit 总量受限，可在此截断。此处保持按平台 limit 聚合后的全量，按需可改为 [:limit]
+    elif sort_by == "liquidity":
+        all_markets.sort(key=lambda m: (m.liquidity or 0.0), reverse=True)
 
     from langchain_core.documents import Document
 
-    docs = []
+    docs: list[Document] = []
     for m in all_markets:
         text = _market_to_text(m)
-        docs.append(
-            Document(
-                page_content=text,
-                metadata={
-                    "platform": m.platform.value,
-                    "market_id": m.market_id,
-                    "condition_id": m.condition_id,
-                    "category": m.category,
-                    "tags": m.tags,
-                },
-            )
-        )
+        # Chroma 只接受 str/int/float/bool，且不允许 None 或复杂类型。
+        meta: dict[str, object] = {
+            "platform": m.platform.value,
+            "market_id": str(m.market_id),
+        }
+        if m.condition_id:
+            meta["condition_id"] = str(m.condition_id)
+        if m.category:
+            meta["category"] = str(m.category)
+        if getattr(m, "tags", None):
+            # 将 tags 列表序列化为逗号分隔字符串，避免复杂类型。
+            meta["tags"] = ",".join(str(t) for t in (m.tags or []))
+        docs.append(Document(page_content=text, metadata=meta))
 
     if not docs:
         raise RuntimeError("No markets available for building vector index.")

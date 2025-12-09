@@ -76,7 +76,6 @@ def build_agentic_rag_graph() -> Any:
     markets_store = _load_markets_store(settings)
 
     docs_retriever = docs_store.as_retriever(search_kwargs={"k": 6})
-    markets_retriever = markets_store.as_retriever(search_kwargs={"k": 8})
 
     router = llm.with_structured_output(RouteDecision)
     grader = llm.with_structured_output(
@@ -139,7 +138,8 @@ def build_agentic_rag_graph() -> Any:
             search_kwargs = {"k": 8}
             if platform_filter in {"polymarket", "opinion"}:
                 search_kwargs["filter"] = {"platform": platform_filter}
-            docs = markets_retriever.invoke(question, search_kwargs=search_kwargs)
+            retriever = markets_store.as_retriever(search_kwargs=search_kwargs)
+            docs = retriever.invoke(question)
         else:
             docs = docs_retriever.invoke(question)
 

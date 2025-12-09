@@ -25,10 +25,10 @@ def tui(limit: int, threshold: float) -> None:
 @click.option("--model", default=None, help="LLM model name (OpenAI-compatible).")
 @click.option(
     "--mode",
-    type=click.Choice(["auto", "docs", "tools", "markets", "graph"], case_sensitive=False),
+    type=click.Choice(["auto", "docs", "markets", "graph"], case_sensitive=False),
     default="auto",
     show_default=True,
-    help="选择 Agent 模式：文档 RAG、基础工具、市场 RAG、LangGraph 等。",
+    help="选择 Agent 模式：文档 RAG、市场 RAG 或 Agentic RAG Graph。",
 )
 def agent(question: str, model: str | None, mode: str) -> None:
     """通过 LangChain Agent / RAG 回答问题。"""
