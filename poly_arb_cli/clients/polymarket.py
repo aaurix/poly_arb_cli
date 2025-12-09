@@ -9,7 +9,7 @@ from typing import Iterable, List, Optional
 import httpx
 
 from ..config import Settings
-from ..types import Market, OrderBook, OrderBookLevel, Platform, Position, PriceQuote
+from ..types import Market, OrderBook, OrderBookLevel, Platform, Position, PriceQuote, TradeEvent
 
 
 class PolymarketClient:
@@ -23,6 +23,7 @@ class PolymarketClient:
         self.settings = settings
         self.base_url = base_url or settings.polymarket_base_url
         self._http = httpx.AsyncClient(base_url=self.base_url, timeout=10.0)
+        self._data_http = httpx.AsyncClient(base_url=settings.polymarket_data_url, timeout=10.0)
 
         self._clob_client = None
         self._clob_import_error: Optional[Exception] = None
@@ -178,6 +179,65 @@ class PolymarketClient:
     async def close(self) -> None:
         """关闭底层 HTTP 客户端。"""
         await self._http.aclose()
+        await self._data_http.aclose()
+
+    async def get_recent_trades(self, *, limit: int = 200) -> List[TradeEvent]:
+        """从 Data-API 获取最近成交列表。
+
+        使用 `https://data-api.polymarket.com/trades`，按时间倒序返回最近的
+        全市场成交记录。该接口为只读，无需 CLOB 凭证。
+
+        Args:
+            limit: 最大返回条数。
+
+        Returns:
+            解析后的 `TradeEvent` 列表，按时间倒序排序。
+        """
+        try:
+            resp = await self._data_http.get("/trades", params={"limit": limit})
+            resp.raise_for_status()
+            raw_list = resp.json()
+        except Exception:
+            return []
+
+        trades: List[TradeEvent] = []
+        if not isinstance(raw_list, list):
+            return trades
+
+        for item in raw_list:
+            try:
+                condition_id = str(item.get("conditionId") or "")
+                token_id = str(item.get("asset") or "")
+                side = str(item.get("side") or "")
+                size = float(item.get("size") or 0.0)
+                price = float(item.get("price") or 0.0)
+                ts = int(item.get("timestamp") or 0)
+                title = str(item.get("title") or "")
+                outcome = item.get("outcome") or None
+                tx_hash = item.get("transactionHash") or None
+                wallet = item.get("proxyWallet") or None
+                pseudonym = item.get("pseudonym") or None
+                notional = size * price
+                trades.append(
+                    TradeEvent(
+                        condition_id=condition_id,
+                        token_id=token_id,
+                        side=side,
+                        size=size,
+                        price=price,
+                        notional=notional,
+                        timestamp=ts,
+                        title=title,
+                        outcome=outcome,
+                        tx_hash=tx_hash,
+                        wallet=wallet,
+                        pseudonym=pseudonym,
+                    )
+                )
+            except Exception:
+                continue
+
+        return trades
 
 
 def _lookup(entries: Iterable[dict[str, object]], market_id: str) -> dict[str, object]:

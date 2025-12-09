@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from enum import Enum
 from typing import Optional
 
@@ -96,3 +97,42 @@ class TradeResult:
     op_leg: TradeLegResult
     success: bool
     notes: Optional[str] = None
+
+
+@dataclass
+class TradeEvent:
+    """Polymarket 单笔成交事件。
+
+    Attributes:
+        condition_id: 条件 ID（market/condition 标识）。
+        token_id: 资产 ID（tokenId）。
+        side: 成交方向，BUY 或 SELL。
+        size: 成交数量（份数）。
+        price: 成交价格（0-1 间小数）。
+        notional: 名义金额，通常为 size * price。
+        timestamp: Unix 时间戳（秒）。
+        title: 市场标题。
+        outcome: 具体 outcome 名称（如 Yes/No 或 Up/Down）。
+        tx_hash: 交易哈希。
+        wallet: 用户 proxy 钱包地址。
+        pseudonym: 用户昵称（如有）。
+    """
+
+    condition_id: str
+    token_id: str
+    side: str
+    size: float
+    price: float
+    notional: float
+    timestamp: int
+    title: str
+    outcome: Optional[str] = None
+    tx_hash: Optional[str] = None
+    wallet: Optional[str] = None
+    pseudonym: Optional[str] = None
+
+    @property
+    def dt(self) -> datetime:
+        """将 Unix 时间戳转换为 UTC datetime。"""
+
+        return datetime.fromtimestamp(self.timestamp, tz=timezone.utc)

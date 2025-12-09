@@ -313,6 +313,133 @@ def run_bot(interval: int, threshold: float) -> None:
     asyncio.run(_loop())
 
 
+@main.command("trades-tape")
+@click.option(
+    "--min-notional",
+    default=1000.0,
+    show_default=True,
+    type=float,
+    help="过滤最小名义金额（size*price），单位约为 USDC。",
+)
+@click.option(
+    "--interval",
+    default=5,
+    show_default=True,
+    type=int,
+    help="轮询 Polymarket 成交的间隔秒数。",
+)
+@click.option(
+    "--window",
+    default=50,
+    show_default=True,
+    type=int,
+    help="界面中最多展示的最近成交条数。",
+)
+def trades_tape(min_notional: float, interval: int, window: int) -> None:
+    """实时展示 Polymarket 大额成交流水。"""
+
+    async def _run() -> None:
+        from rich.live import Live
+        from rich.layout import Layout
+        from rich.panel import Panel
+
+        settings = Settings.load()
+        pm_client, op_client = _build_clients(settings)
+
+        # 状态统计
+        recent_trades: list[TradeEvent] = []
+        seen_hashes: set[str] = set()
+        last_ts: int = 0
+        total_count = 0
+        total_notional = 0.0
+
+        try:
+            with Live(console=console, refresh_per_second=4) as live:
+                while True:
+                    trades = await pm_client.get_recent_trades(limit=200)
+
+                    # Data-API 按时间倒序返回，这里只保留新且大额的成交
+                    new_trades: list[TradeEvent] = []
+                    for t in trades:
+                        if t.timestamp < last_ts:
+                            break
+                        if t.tx_hash and t.tx_hash in seen_hashes:
+                            continue
+                        if t.notional < min_notional:
+                            continue
+                        new_trades.append(t)
+
+                    if new_trades:
+                        # 处理顺序：先旧后新，append 到 recent_trades 尾部
+                        for t in reversed(new_trades):
+                            recent_trades.append(t)
+                            if t.tx_hash:
+                                seen_hashes.add(t.tx_hash)
+                            total_count += 1
+                            total_notional += t.notional
+                        last_ts = max(last_ts, max(t.timestamp for t in new_trades))
+
+                        if len(recent_trades) > window:
+                            recent_trades = recent_trades[-window:]
+
+                    avg_notional = total_notional / total_count if total_count else 0.0
+
+                    # 统计面板
+                    stats_table = Table(show_header=False, box=None)
+                    stats_table.add_column("Metric", style="cyan", justify="right")
+                    stats_table.add_column("Value", justify="left")
+                    stats_table.add_row("Trades", f"{total_count}")
+                    stats_table.add_row("Notional", f"{total_notional:,.2f}")
+                    stats_table.add_row("Avg trade", f"{avg_notional:,.2f}")
+                    stats_panel = Panel(stats_table, title="Polymarket Trade Stats", border_style="green")
+
+                    # 成交流水表
+                    tape_table = Table(
+                        title=f"Polymarket Trades ≥ {min_notional:.0f}",
+                        header_style="bold cyan",
+                        show_lines=False,
+                        row_styles=["dim", ""],
+                    )
+                    tape_table.add_column("Time (UTC)", justify="right")
+                    tape_table.add_column("Market", overflow="fold")
+                    tape_table.add_column("Outcome", justify="left")
+                    tape_table.add_column("Side", justify="center")
+                    tape_table.add_column("Size", justify="right")
+                    tape_table.add_column("Price", justify="right")
+                    tape_table.add_column("Notional", justify="right")
+                    tape_table.add_column("Trader", overflow="fold")
+
+                    for t in reversed(recent_trades):
+                        side = (t.side or "").upper()
+                        side_style = "green" if side == "BUY" else "red"
+                        time_str = t.dt.strftime("%H:%M:%S")
+                        trader = t.pseudonym or (t.wallet[:10] + "..." if t.wallet else "")
+                        tape_table.add_row(
+                            time_str,
+                            t.title,
+                            t.outcome or "",
+                            f"[{side_style}]{side}[/{side_style}]",
+                            f"{t.size:.2f}",
+                            f"{t.price:.3f}",
+                            f"{t.notional:.2f}",
+                            trader,
+                        )
+
+                    layout = Layout()
+                    layout.split_column(
+                        Layout(stats_panel, name="stats", size=5),
+                        Layout(tape_table, name="tape", ratio=1),
+                    )
+                    live.update(layout)
+
+                    await asyncio.sleep(interval)
+        finally:
+            await asyncio.gather(pm_client.close(), op_client.close())
+
+    # 运行异步主循环
+    asyncio.run(_run())
+
+
 @main.command("tui")
 @click.option("--limit", default=20, show_default=True, type=int)
 @click.option("--threshold", default=0.6, show_default=True, type=float)

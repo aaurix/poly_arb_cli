@@ -13,6 +13,7 @@ class Settings(BaseSettings):
     polymarket_api_key: Optional[str] = None
     polymarket_base_url: str = "https://gamma-api.polymarket.com"
     polymarket_clob_url: str = "https://clob.polymarket.com"
+    polymarket_data_url: str = "https://data-api.polymarket.com"
     polymarket_ws_url: str = "wss://clob.polymarket.com/stream"
 
     opinion_api_key: Optional[str] = None
